@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import hashlib
 import json
 import os
 import re
@@ -149,15 +150,21 @@ def list_elevenlabs_voices(api_key: str) -> list[dict]:
 
 def tts_request(api_key: str, voice_id: str, text: str, model_id: str, variation: int = 0) -> bytes:
     url = "https://api.elevenlabs.io/v1/text-to-speech/" + urllib.parse.quote(voice_id) + "?output_format=mp3_44100_128"
+    regen_profiles = [
+        {"stability": 0.42, "similarity_boost": 0.72, "style": 0.0, "use_speaker_boost": False},
+        {"stability": 0.30, "similarity_boost": 0.78, "style": 0.05, "use_speaker_boost": False},
+        {"stability": 0.55, "similarity_boost": 0.55, "style": 0.12, "use_speaker_boost": True},
+        {"stability": 0.24, "similarity_boost": 0.85, "style": 0.0, "use_speaker_boost": True},
+    ]
+    settings = (
+        {"stability": 0.95, "similarity_boost": 0.6, "style": 0.0, "use_speaker_boost": False}
+        if not variation
+        else regen_profiles[abs(int(variation)) % len(regen_profiles)]
+    )
     body = {
         "text": clean_text(text),
         "model_id": model_id or "eleven_multilingual_v2",
-        "voice_settings": {
-            "stability": 0.95 if not variation else max(0.35, 0.65 - (variation % 4) * 0.07),
-            "similarity_boost": 0.6,
-            "style": 0.0 if not variation else 0.05,
-            "use_speaker_boost": False,
-        },
+        "voice_settings": settings,
     }
     if variation:
         body["seed"] = (int(time.time() * 1000) + variation * 7919) % 2147483647
@@ -386,13 +393,25 @@ def regenerate_row(index: int, page_df: pd.DataFrame) -> None:
     key_for_count = row_key(row)
     regen_counts[key_for_count] = int(regen_counts.get(key_for_count, 0)) + 1
     voice_id = config["voice_us"] if row["accent"] == "US" else config["voice_uk"]
-    variation = int(index) + int(time.time()) + (regen_counts[key_for_count] * 1009)
-    audio = tts_request(config["api_key"], voice_id, dictionary_tts_text(row["word"], row["pos"]), config["model_id"], variation=variation)
-    matched = page_df[(page_df["accent"] == row["accent"]) & (page_df["pronunciation_key"] == row["pronunciation_key"])].index.tolist()
     audios = get_audios()
+    old_audio = audios.get(key_for_count, b"")
+    old_hash = hashlib.sha1(old_audio).hexdigest() if old_audio else ""
+    audio = b""
+    new_hash = ""
+    tts_text = dictionary_tts_text(row["word"], row["pos"])
+    for attempt in range(4):
+        variation = int(index) + int(time.time()) + (regen_counts[key_for_count] * 1009) + (attempt * 17011)
+        audio = tts_request(config["api_key"], voice_id, tts_text, config["model_id"], variation=variation)
+        new_hash = hashlib.sha1(audio).hexdigest()
+        if not old_hash or new_hash != old_hash:
+            break
+    matched = page_df[(page_df["accent"] == row["accent"]) & (page_df["pronunciation_key"] == row["pronunciation_key"])].index.tolist()
     for item_index in matched:
         audios[row_key(df.loc[item_index])] = audio
-    update_rows(matched, status="검수중", source_note=f"regenerated {time.strftime('%Y-%m-%d %H:%M:%S')}")
+    note = f"regenerated {time.strftime('%Y-%m-%d %H:%M:%S')} / {new_hash[:8]}"
+    if old_hash and new_hash == old_hash:
+        note += " / provider returned same audio"
+    update_rows(matched, status="검수중", source_note=note)
 
 
 def build_page_zip(page_df: pd.DataFrame) -> bytes:
