@@ -748,7 +748,8 @@ def render_rows(page_df: pd.DataFrame) -> None:
         key = row_key(row)
         with cols[5]:
             if key in audios:
-                render_inline_play_button(audios[key], f"play_{index}_{key}")
+                audio_hash = str(abs(hash(audios[key])))[-10:]
+                render_inline_play_button(audios[key], f"play_{index}_{key}_{audio_hash}")
         with cols[6]:
             if st.button("이상 표시", key=f"issue_{index}"):
                 note = f"발음 이상 표시 {time.strftime('%Y-%m-%d %H:%M:%S')}"
@@ -765,9 +766,6 @@ def render_rows(page_df: pd.DataFrame) -> None:
                     with st.spinner("재생성 중..."):
                         regenerate_row(index, page_df)
                     st.success("완료")
-                    new_key = row_key(get_df().loc[index])
-                    if new_key in get_audios():
-                        render_inline_play_button(get_audios()[new_key], f"regen_play_{index}_{new_key}")
                 except Exception as exc:
                     st.error(str(exc))
 
