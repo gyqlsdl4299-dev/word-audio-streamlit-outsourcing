@@ -382,8 +382,12 @@ def regenerate_row(index: int, page_df: pd.DataFrame) -> None:
         raise RuntimeError("먼저 성우를 적용해 주세요.")
     df = get_df()
     row = df.loc[index]
+    regen_counts = st.session_state.setdefault("regen_counts", {})
+    key_for_count = row_key(row)
+    regen_counts[key_for_count] = int(regen_counts.get(key_for_count, 0)) + 1
     voice_id = config["voice_us"] if row["accent"] == "US" else config["voice_uk"]
-    audio = tts_request(config["api_key"], voice_id, dictionary_tts_text(row["word"], row["pos"]), config["model_id"], variation=index + int(time.time()))
+    variation = int(index) + int(time.time()) + (regen_counts[key_for_count] * 1009)
+    audio = tts_request(config["api_key"], voice_id, dictionary_tts_text(row["word"], row["pos"]), config["model_id"], variation=variation)
     matched = page_df[(page_df["accent"] == row["accent"]) & (page_df["pronunciation_key"] == row["pronunciation_key"])].index.tolist()
     audios = get_audios()
     for item_index in matched:
@@ -765,7 +769,7 @@ def render_rows(page_df: pd.DataFrame) -> None:
                 try:
                     with st.spinner("재생성 중..."):
                         regenerate_row(index, page_df)
-                    st.success("완료")
+                    st.rerun()
                 except Exception as exc:
                     st.error(str(exc))
 
