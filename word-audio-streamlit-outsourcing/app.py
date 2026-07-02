@@ -399,7 +399,7 @@ def regenerate_row(index: int, page_df: pd.DataFrame) -> None:
     audio = b""
     new_hash = ""
     tts_text = dictionary_tts_text(row["word"], row["pos"])
-    for attempt in range(4):
+    for attempt in range(2):
         variation = int(index) + int(time.time()) + (regen_counts[key_for_count] * 1009) + (attempt * 17011)
         audio = tts_request(config["api_key"], voice_id, tts_text, config["model_id"], variation=variation)
         new_hash = hashlib.sha1(audio).hexdigest()
@@ -774,10 +774,6 @@ def render_rows(page_df: pd.DataFrame) -> None:
         cols[3].caption(row["file_name"])
         cols[4].write(row["status"])
         key = row_key(row)
-        with cols[5]:
-            if key in audios:
-                audio_hash = str(abs(hash(audios[key])))[-10:]
-                render_inline_play_button(audios[key], f"play_{index}_{key}_{audio_hash}")
         with cols[6]:
             if st.button("이상 표시", key=f"issue_{index}"):
                 note = f"발음 이상 표시 {time.strftime('%Y-%m-%d %H:%M:%S')}"
@@ -786,11 +782,14 @@ def render_rows(page_df: pd.DataFrame) -> None:
         with cols[7]:
             if st.button("재생성", key=f"regen_{index}"):
                 try:
-                    with st.spinner("재생성 중..."):
-                        regenerate_row(index, page_df)
-                    st.rerun()
+                    regenerate_row(index, page_df)
+                    st.toast("재생성 완료")
                 except Exception as exc:
                     st.error(str(exc))
+        with cols[5]:
+            if key in audios:
+                audio_hash = str(abs(hash(audios[key])))[-10:]
+                render_inline_play_button(audios[key], f"play_{index}_{key}_{audio_hash}")
 
 
 def main() -> None:
