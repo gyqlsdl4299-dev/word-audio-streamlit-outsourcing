@@ -678,9 +678,14 @@ def save_page_to_google(page_df: pd.DataFrame) -> tuple[int, int]:
     audios = get_audios()
     saved = 0
     skipped = 0
+    issues = 0
     for index, row in page_df.iterrows():
         if clean_text(row.get("status")) == "이상표시":
+            note = clean_text(row.get("issue_note")) or f"발음 이상 표시 {time.strftime('%Y-%m-%d %H:%M:%S')}"
+            update_google_sheet(row, {"status": "이상표시", "issue_note": note})
+            append_issue_sheet(row, note)
             skipped += 1
+            issues += 1
             continue
         key = row_key(row)
         if key not in audios:
@@ -758,11 +763,6 @@ def render_rows(page_df: pd.DataFrame) -> None:
             if st.button("이상 표시", key=f"issue_{index}"):
                 note = f"발음 이상 표시 {time.strftime('%Y-%m-%d %H:%M:%S')}"
                 update_rows([index], status="이상표시", issue_note=note)
-                try:
-                    update_google_sheet(row, {"status": "이상표시", "issue_note": note})
-                    append_issue_sheet(row, note)
-                except Exception as exc:
-                    st.warning(f"Google Sheet 반영 실패: {exc}")
                 st.rerun()
         with cols[7]:
             if st.button("재생성", key=f"regen_{index}"):
