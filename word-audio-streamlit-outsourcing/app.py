@@ -273,6 +273,21 @@ def page_rows(df: pd.DataFrame, page: int) -> pd.DataFrame:
     return page_df
 
 
+def split_review_rows(page_df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
+    seen: set[tuple[str, str]] = set()
+    main_indexes = []
+    reuse_indexes = []
+    for index, row in page_df.iterrows():
+        pron_key = clean_text(row.get("pronunciation_key")) or f"id:{index}"
+        key = (clean_text(row.get("accent")).upper(), pron_key)
+        if key in seen:
+            reuse_indexes.append(index)
+        else:
+            seen.add(key)
+            main_indexes.append(index)
+    return page_df.loc[main_indexes].copy(), page_df.loc[reuse_indexes].copy()
+
+
 def update_rows(indexes: list[int], **updates) -> None:
     df = get_df()
     if df is None:
@@ -640,6 +655,9 @@ def analyze_page_with_gemini(page_df: pd.DataFrame) -> int:
 
 def render_rows(page_df: pd.DataFrame) -> None:
     audios = get_audios()
+    if page_df.empty:
+        st.info("표시할 행이 없습니다.")
+        return
     for index, row in page_df.iterrows():
         cols = st.columns([2.0, 1.1, 0.7, 2.8, 1.0, 1.0, 1.0, 1.0])
         cols[0].markdown(f"**{row['word']}**  \n<small>{row['pos']}</small>", unsafe_allow_html=True)
@@ -711,6 +729,7 @@ def main() -> None:
         st.caption(f"현재 위치: {int(page):,} / {max(pages):,}페이지")
     st.session_state["current_page"] = int(page)
     page_df = page_rows(df, int(page))
+    main_page_df, reuse_page_df = split_review_rows(page_df)
 
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("현재 페이지 행", len(page_df))
@@ -758,7 +777,12 @@ def main() -> None:
         st.download_button("상태 반영 엑셀 다운로드", output.getvalue(), file_name="review_status.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
     st.divider()
-    render_rows(page_df)
+    st.subheader("검수 목록")
+    st.caption("같은 발음으로 묶인 sense는 대표 행만 여기에서 검수합니다.")
+    render_rows(main_page_df)
+    with st.expander(f"재사용 예정 파일 {len(reuse_page_df)}개", expanded=False):
+        st.caption("아래 행들은 위 대표 음원을 같은 발음으로 재사용하되, 저장 시 각 sense_code 파일명으로 따로 저장됩니다.")
+        render_rows(reuse_page_df)
 
 
 if __name__ == "__main__":
