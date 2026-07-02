@@ -274,7 +274,7 @@ def render_google_diagnostics() -> None:
         st.caption("이 이메일이 작업자1/2 Google Sheet와 음원 저장 폴더에 편집자로 공유되어 있어야 합니다.")
         if st.button("Google Sheet 권한 테스트"):
             try:
-                _drive, sheets = google_clients()
+                drive, sheets = google_clients()
                 test_rows = []
                 for label, spreadsheet_id, sheet_name in [
                     ("작업자1", secret_text("GOOGLE_SHEET_ID_WORKER_1"), secret_text("GOOGLE_WORKSHEET_NAME_WORKER_1", "worker_1_upload")),
@@ -283,10 +283,16 @@ def render_google_diagnostics() -> None:
                     if not spreadsheet_id:
                         test_rows.append({"대상": label, "결과": "시트 ID 없음"})
                         continue
-                    meta = sheets.spreadsheets().get(spreadsheetId=spreadsheet_id).execute()
-                    titles = [sheet["properties"]["title"] for sheet in meta.get("sheets", [])]
-                    values = sheets.spreadsheets().values().get(spreadsheetId=spreadsheet_id, range=f"{sheet_name}!A1:A1").execute()
-                    test_rows.append({"대상": label, "결과": "접근 가능", "탭 목록": ", ".join(titles), "A1": values.get("values", [[""]])[0][0] if values.get("values") else ""})
+                    values = sheets.spreadsheets().values().get(
+                        spreadsheetId=spreadsheet_id,
+                        range=f"{sheet_name}!A1:A1",
+                        fields="values",
+                    ).execute(num_retries=0)
+                    test_rows.append({"대상": label, "결과": "접근 가능", "시트ID": spreadsheet_id, "A1": values.get("values", [[""]])[0][0] if values.get("values") else ""})
+                folder_id = secret_text("GOOGLE_DRIVE_FOLDER_ID")
+                if folder_id:
+                    folder = drive.files().get(fileId=folder_id, fields="id,name").execute(num_retries=0)
+                    test_rows.append({"대상": "Drive 폴더", "결과": "접근 가능", "시트ID": folder.get("id", ""), "A1": folder.get("name", "")})
                 st.dataframe(pd.DataFrame(test_rows), use_container_width=True)
             except Exception as exc:
                 st.error(str(exc))
