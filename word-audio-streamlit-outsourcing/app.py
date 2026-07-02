@@ -420,6 +420,9 @@ def build_page_zip(page_df: pd.DataFrame) -> bytes:
     with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as zf:
         log_rows = []
         for index, row in page_df.iterrows():
+            if clean_text(row.get("status")) == "이상표시":
+                log_rows.append(row.to_dict())
+                continue
             key = row_key(row)
             if key in audios:
                 zf.writestr(row["file_name"], audios[key])
@@ -769,6 +772,40 @@ def save_page_to_google(page_df: pd.DataFrame) -> tuple[int, int]:
     return saved, skipped
 
 
+def submit_page_zip_status(page_df: pd.DataFrame) -> tuple[int, int]:
+    audios = get_audios()
+    saved = 0
+    skipped = 0
+    now = time.strftime("%Y-%m-%d %H:%M:%S")
+    for index, row in page_df.iterrows():
+        if clean_text(row.get("status")) == "이상표시":
+            note = clean_text(row.get("issue_note")) or f"발음 이상 표시 {now}"
+            update_rows([index], status="이상표시", issue_note=note)
+            update_google_sheet(row, {"status": "이상표시", "issue_note": note})
+            append_issue_sheet(row, note)
+            skipped += 1
+            continue
+        key = row_key(row)
+        if key not in audios:
+            skipped += 1
+            continue
+        update_rows([index], status="저장완료", saved_at=now, drive_url="ZIP 다운로드")
+        update_google_sheet(row, {"status": "저장완료", "saved_at": now, "drive_url": "ZIP 다운로드"})
+        saved += 1
+    append_progress_sheet(page_df, saved, skipped)
+    return saved, skipped
+
+
+def handle_zip_status_submit(page_df: pd.DataFrame) -> None:
+    try:
+        saved, skipped = submit_page_zip_status(page_df)
+        st.session_state["zip_submit_message"] = f"ZIP 기준 시트 반영 완료: 저장완료 {saved}개 / 이상·미생성 {skipped}개"
+        st.session_state.pop("zip_submit_error", None)
+    except Exception as exc:
+        st.session_state["zip_submit_error"] = str(exc)
+        st.session_state.pop("zip_submit_message", None)
+
+
 def analyze_page_with_gemini(page_df: pd.DataFrame) -> int:
     key = gemini_key()
     if not key:
@@ -911,17 +948,26 @@ def main() -> None:
         except Exception as exc:
             st.error(str(exc))
     with action_cols[3]:
-        st.download_button("현재 페이지 ZIP", build_page_zip(page_df), file_name=f"page_{int(page):03d}.zip", mime="application/zip", use_container_width=True)
-    if action_cols[4].button("현재 페이지 저장", use_container_width=True):
-        if google_save_enabled():
-            try:
-                saved, skipped = save_page_to_google(page_df)
-                st.success(f"Google Drive 저장 완료: {saved}개 / 미생성 {skipped}개")
-                st.rerun()
-            except Exception as exc:
-                st.error(str(exc))
-        else:
-            st.warning("Google Drive 설정이 없어서 자동 저장을 못 했습니다. ZIP 다운로드를 사용해 주세요.")
+        st.download_button(
+            "현재 페이지 ZIP",
+            build_page_zip(page_df),
+            file_name=f"page_{int(page):03d}.zip",
+            mime="application/zip",
+            use_container_width=True,
+            on_click=handle_zip_status_submit,
+            args=(page_df.copy(),),
+        )
+    if action_cols[4].button("시트만 반영", use_container_width=True):
+        try:
+            saved, skipped = submit_page_zip_status(page_df)
+            st.success(f"ZIP 기준 시트 반영 완료: 저장완료 {saved}개 / 이상·미생성 {skipped}개")
+            st.rerun()
+        except Exception as exc:
+            st.error(str(exc))
+    if st.session_state.get("zip_submit_message"):
+        st.success(st.session_state.pop("zip_submit_message"))
+    if st.session_state.get("zip_submit_error"):
+        st.error(st.session_state.pop("zip_submit_error"))
     with action_cols[5]:
         output = io.BytesIO()
         df.to_excel(output, index=False)
