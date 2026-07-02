@@ -298,7 +298,7 @@ def render_google_diagnostics() -> None:
                     test_rows.append({"대상": label, "결과": "접근 가능", "시트ID": spreadsheet_id, "A1": values.get("values", [[""]])[0][0] if values.get("values") else ""})
                 folder_id = secret_text("GOOGLE_DRIVE_FOLDER_ID")
                 if folder_id:
-                    folder = drive.files().get(fileId=folder_id, fields="id,name").execute(num_retries=0)
+                    folder = drive.files().get(fileId=folder_id, fields="id,name", supportsAllDrives=True).execute(num_retries=0)
                     test_rows.append({"대상": "Drive 폴더", "결과": "접근 가능", "시트ID": folder.get("id", ""), "A1": folder.get("name", "")})
                 st.dataframe(pd.DataFrame(test_rows), use_container_width=True)
             except Exception as exc:
@@ -715,6 +715,7 @@ def save_page_to_google(page_df: pd.DataFrame) -> tuple[int, int]:
             body={"name": row["file_name"], "parents": [folder_id]},
             media_body=media,
             fields="id,webViewLink",
+            supportsAllDrives=True,
         ).execute()
         now = time.strftime("%Y-%m-%d %H:%M:%S")
         update_rows([index], status="저장완료", saved_at=now, drive_url=file.get("webViewLink", ""))
