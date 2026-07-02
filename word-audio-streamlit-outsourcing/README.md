@@ -15,6 +15,7 @@ DB 파일을 배포하지 않고, 업로드한 엑셀을 기준으로 음원을 
 - 현재 페이지 ZIP 다운로드
 - Google Drive 설정 시 현재 페이지 음원 자동 업로드
 - Google Sheets 설정 시 저장완료 / 이상표시 자동 반영
+- 재접속 후 엑셀 재업로드 시 Google Sheet 기록을 읽어 첫 미완료 페이지로 이동
 
 ## Streamlit Cloud Secrets
 
@@ -32,6 +33,7 @@ GOOGLE_WORKSHEET_NAME_WORKER_1 = "worker_1_upload"
 GOOGLE_SHEET_ID_WORKER_2 = "작업자2_구글시트ID"
 GOOGLE_WORKSHEET_NAME_WORKER_2 = "worker_2_upload"
 GOOGLE_ISSUE_SHEET_NAME = "Issues"
+GOOGLE_PROGRESS_SHEET_NAME = "Progress"
 ```
 
 Google Drive/Sheets 자동 연동을 쓰려면 서비스 계정 이메일을 저장 폴더와 Google Sheet에 공유 권한으로 추가해야 합니다.

@@ -358,7 +358,10 @@ def build_page_zip(page_df: pd.DataFrame) -> bytes:
 
 
 def google_enabled() -> bool:
-    return bool(secret_value("GOOGLE_SERVICE_ACCOUNT_JSON", "") and secret_text("GOOGLE_DRIVE_FOLDER_ID", ""))
+    return bool(
+        (secret_text("GOOGLE_SERVICE_ACCOUNT_JSON_B64") or secret_value("GOOGLE_SERVICE_ACCOUNT_JSON", ""))
+        and secret_text("GOOGLE_DRIVE_FOLDER_ID", "")
+    )
 
 
 def google_clients():
@@ -415,6 +418,81 @@ def google_sheet_target(row: pd.Series) -> tuple[str, str]:
     return spreadsheet_id, sheet_name
 
 
+def ensure_sheet_exists(service, spreadsheet_id: str, sheet_name: str, headers: list[str] | None = None) -> None:
+    meta = service.spreadsheets().get(spreadsheetId=spreadsheet_id).execute()
+    titles = {sheet["properties"]["title"] for sheet in meta.get("sheets", [])}
+    if sheet_name not in titles:
+        service.spreadsheets().batchUpdate(
+            spreadsheetId=spreadsheet_id,
+            body={"requests": [{"addSheet": {"properties": {"title": sheet_name}}}]},
+        ).execute()
+    if headers:
+        result = service.spreadsheets().values().get(spreadsheetId=spreadsheet_id, range=f"{sheet_name}!1:1").execute()
+        current = result.get("values", [[]])[0]
+        if not current:
+            service.spreadsheets().values().update(
+                spreadsheetId=spreadsheet_id,
+                range=f"{sheet_name}!1:1",
+                valueInputOption="RAW",
+                body={"values": [headers]},
+            ).execute()
+
+
+def sync_status_from_google(df: pd.DataFrame) -> tuple[pd.DataFrame, int]:
+    if df.empty:
+        return df, 0
+    _drive, sheets = google_clients()
+    synced = 0
+    next_df = df.copy()
+    sync_columns = ["status", "issue_note", "saved_at", "drive_url"]
+    for _worker_id, group in next_df.groupby("worker_id", dropna=False):
+        spreadsheet_id, sheet_name = google_sheet_target(group.iloc[0])
+        if not spreadsheet_id:
+            continue
+        try:
+            result = sheets.spreadsheets().values().get(spreadsheetId=spreadsheet_id, range=f"{sheet_name}!A1:Z").execute()
+        except Exception:
+            continue
+        values = result.get("values", [])
+        if not values:
+            continue
+        headers = [clean_text(item).lstrip("\ufeff").lower() for item in values[0]]
+        if "audio_id" not in headers and "file_name" not in headers:
+            continue
+        rows_by_audio = {}
+        rows_by_file = {}
+        for sheet_row in values[1:]:
+            padded = sheet_row + [""] * (len(headers) - len(sheet_row))
+            record = {headers[i]: clean_text(padded[i]) for i in range(len(headers))}
+            if record.get("audio_id"):
+                rows_by_audio[record["audio_id"]] = record
+            if record.get("file_name"):
+                rows_by_file[record["file_name"]] = record
+        for index, row in group.iterrows():
+            record = rows_by_audio.get(clean_text(row.get("audio_id"))) or rows_by_file.get(clean_text(row.get("file_name")))
+            if not record:
+                continue
+            changed = False
+            for column in sync_columns:
+                value = clean_text(record.get(column))
+                if value:
+                    next_df.at[index, column] = value
+                    changed = True
+            if changed:
+                synced += 1
+    return next_df, synced
+
+
+def first_incomplete_page(df: pd.DataFrame) -> int:
+    done_statuses = {"저장완료", "이상표시"}
+    for page in sorted(df["worker_page"].astype(int).unique().tolist()):
+        page_df = page_rows(df, int(page))
+        if not page_df.empty and not page_df["status"].isin(done_statuses).all():
+            return int(page)
+    pages = sorted(df["worker_page"].astype(int).unique().tolist())
+    return int(pages[-1]) if pages else 1
+
+
 def update_google_sheet(row: pd.Series, updates: dict) -> None:
     spreadsheet_id, sheet_name = google_sheet_target(row)
     if not spreadsheet_id:
@@ -461,6 +539,36 @@ def append_issue_sheet(row: pd.Series, note: str) -> None:
     ).execute()
 
 
+def append_progress_sheet(page_df: pd.DataFrame, saved: int, skipped: int) -> None:
+    if page_df.empty:
+        return
+    spreadsheet_id, _sheet_name = google_sheet_target(page_df.iloc[0])
+    if not spreadsheet_id:
+        return
+    _drive, sheets = google_clients()
+    progress_sheet = secret_text("GOOGLE_PROGRESS_SHEET_NAME", "Progress")
+    headers = ["submitted_at", "worker_id", "worker_label", "worker_page", "global_page", "total_rows", "saved", "skipped_or_issue"]
+    ensure_sheet_exists(sheets, spreadsheet_id, progress_sheet, headers)
+    first = page_df.iloc[0]
+    values = [[
+        time.strftime("%Y-%m-%d %H:%M:%S"),
+        first.get("worker_id", ""),
+        first.get("worker_label", ""),
+        first.get("worker_page", ""),
+        first.get("global_page", ""),
+        len(page_df),
+        saved,
+        skipped,
+    ]]
+    sheets.spreadsheets().values().append(
+        spreadsheetId=spreadsheet_id,
+        range=f"{progress_sheet}!A:H",
+        valueInputOption="RAW",
+        insertDataOption="INSERT_ROWS",
+        body={"values": values},
+    ).execute()
+
+
 def save_page_to_google(page_df: pd.DataFrame) -> tuple[int, int]:
     if not google_enabled():
         raise RuntimeError("Google Drive 연동을 쓰려면 GOOGLE_SERVICE_ACCOUNT_JSON, GOOGLE_DRIVE_FOLDER_ID가 필요합니다.")
@@ -472,6 +580,9 @@ def save_page_to_google(page_df: pd.DataFrame) -> tuple[int, int]:
     saved = 0
     skipped = 0
     for index, row in page_df.iterrows():
+        if clean_text(row.get("status")) == "이상표시":
+            skipped += 1
+            continue
         key = row_key(row)
         if key not in audios:
             skipped += 1
@@ -486,6 +597,7 @@ def save_page_to_google(page_df: pd.DataFrame) -> tuple[int, int]:
         update_rows([index], status="저장완료", saved_at=now, drive_url=file.get("webViewLink", ""))
         update_google_sheet(row, {"status": "저장완료", "saved_at": now, "drive_url": file.get("webViewLink", "")})
         saved += 1
+    append_progress_sheet(page_df, saved, skipped)
     return saved, skipped
 
 
@@ -566,9 +678,16 @@ def main() -> None:
         uploaded = st.file_uploader("검수할 엑셀을 업로드해 주세요.", type=["xlsx", "xls"])
         if uploaded and st.button("엑셀 불러오기", type="primary"):
             df = load_uploaded_excel(uploaded)
+            synced = 0
+            if secret_text("GOOGLE_SERVICE_ACCOUNT_JSON_B64") or secret_value("GOOGLE_SERVICE_ACCOUNT_JSON", ""):
+                try:
+                    df, synced = sync_status_from_google(df)
+                except Exception as exc:
+                    st.warning(f"Google Sheet 기존 작업 기록을 불러오지 못했습니다: {exc}")
             set_df(df)
+            st.session_state["current_page"] = first_incomplete_page(df)
             st.session_state["audios"] = {}
-            st.success(f"{uploaded.name}에서 {len(df):,}개 음원 행을 불러왔습니다.")
+            st.success(f"{uploaded.name}에서 {len(df):,}개 음원 행을 불러왔습니다. 기존 기록 {synced:,}개를 반영했습니다.")
             st.rerun()
         st.caption("Gemini API Key는 Secrets에서 자동으로 읽습니다. 현재 페이지 단위로 발음 재사용 키 보정을 실행할 수 있습니다.")
 
@@ -581,7 +700,10 @@ def main() -> None:
         return
 
     pages = sorted(df["worker_page"].astype(int).unique().tolist())
-    page = st.number_input("엑셀 기준 페이지", min_value=min(pages), max_value=max(pages), value=min(pages), step=1)
+    default_page = int(st.session_state.get("current_page", first_incomplete_page(df)))
+    default_page = min(max(default_page, min(pages)), max(pages))
+    page = st.number_input("엑셀 기준 페이지", min_value=min(pages), max_value=max(pages), value=default_page, step=1)
+    st.session_state["current_page"] = int(page)
     page_df = page_rows(df, int(page))
 
     c1, c2, c3, c4 = st.columns(4)
