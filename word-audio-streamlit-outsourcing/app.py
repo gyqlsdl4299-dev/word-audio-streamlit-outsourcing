@@ -472,6 +472,10 @@ def google_enabled() -> bool:
     )
 
 
+def google_save_enabled() -> bool:
+    return bool(secret_text("GOOGLE_APPS_SCRIPT_UPLOAD_URL") or google_enabled())
+
+
 def google_clients():
     from google.oauth2 import service_account
     from googleapiclient.discovery import build
@@ -687,12 +691,43 @@ def append_progress_sheet(page_df: pd.DataFrame, saved: int, skipped: int) -> No
     ).execute()
 
 
-def save_page_to_google(page_df: pd.DataFrame) -> tuple[int, int]:
-    if not google_enabled():
-        raise RuntimeError("Google Drive 연동을 쓰려면 GOOGLE_SERVICE_ACCOUNT_JSON, GOOGLE_DRIVE_FOLDER_ID가 필요합니다.")
-    from googleapiclient.http import MediaIoBaseUpload
+def upload_audio_via_apps_script(file_name: str, audio_bytes: bytes) -> str:
+    url = secret_text("GOOGLE_APPS_SCRIPT_UPLOAD_URL")
+    token = secret_text("GOOGLE_APPS_SCRIPT_TOKEN")
+    if not url:
+        raise RuntimeError("GOOGLE_APPS_SCRIPT_UPLOAD_URL이 설정되지 않았습니다.")
+    payload = {
+        "token": token,
+        "file_name": file_name,
+        "mime_type": "audio/mpeg",
+        "content_b64": base64.b64encode(audio_bytes).decode("ascii"),
+    }
+    request = urllib.request.Request(
+        url,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"content-type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=120) as response:
+            result = json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"Apps Script upload {exc.code}: {detail[:500]}") from exc
+    if not result.get("ok"):
+        raise RuntimeError(f"Apps Script upload failed: {result}")
+    return clean_text(result.get("url") or result.get("webViewLink") or "")
 
-    drive, _ = google_clients()
+
+def save_page_to_google(page_df: pd.DataFrame) -> tuple[int, int]:
+    use_apps_script = bool(secret_text("GOOGLE_APPS_SCRIPT_UPLOAD_URL"))
+    if not use_apps_script and not google_enabled():
+        raise RuntimeError("Google Drive 저장을 쓰려면 GOOGLE_APPS_SCRIPT_UPLOAD_URL 또는 GOOGLE_SERVICE_ACCOUNT_JSON/GOOGLE_DRIVE_FOLDER_ID가 필요합니다.")
+
+    drive = None
+    if not use_apps_script:
+        from googleapiclient.http import MediaIoBaseUpload
+        drive, _ = google_clients()
     folder_id = secret_text("GOOGLE_DRIVE_FOLDER_ID")
     audios = get_audios()
     saved = 0
@@ -710,16 +745,20 @@ def save_page_to_google(page_df: pd.DataFrame) -> tuple[int, int]:
         if key not in audios:
             skipped += 1
             continue
-        media = MediaIoBaseUpload(io.BytesIO(audios[key]), mimetype="audio/mpeg", resumable=False)
-        file = drive.files().create(
-            body={"name": row["file_name"], "parents": [folder_id]},
-            media_body=media,
-            fields="id,webViewLink",
-            supportsAllDrives=True,
-        ).execute()
+        if use_apps_script:
+            drive_url = upload_audio_via_apps_script(row["file_name"], audios[key])
+        else:
+            media = MediaIoBaseUpload(io.BytesIO(audios[key]), mimetype="audio/mpeg", resumable=False)
+            file = drive.files().create(
+                body={"name": row["file_name"], "parents": [folder_id]},
+                media_body=media,
+                fields="id,webViewLink",
+                supportsAllDrives=True,
+            ).execute()
+            drive_url = file.get("webViewLink", "")
         now = time.strftime("%Y-%m-%d %H:%M:%S")
-        update_rows([index], status="저장완료", saved_at=now, drive_url=file.get("webViewLink", ""))
-        update_google_sheet(row, {"status": "저장완료", "saved_at": now, "drive_url": file.get("webViewLink", "")})
+        update_rows([index], status="저장완료", saved_at=now, drive_url=drive_url)
+        update_google_sheet(row, {"status": "저장완료", "saved_at": now, "drive_url": drive_url})
         saved += 1
     append_progress_sheet(page_df, saved, skipped)
     return saved, skipped
@@ -869,7 +908,7 @@ def main() -> None:
     with action_cols[3]:
         st.download_button("현재 페이지 ZIP", build_page_zip(page_df), file_name=f"page_{int(page):03d}.zip", mime="application/zip", use_container_width=True)
     if action_cols[4].button("현재 페이지 저장", use_container_width=True):
-        if google_enabled():
+        if google_save_enabled():
             try:
                 saved, skipped = save_page_to_google(page_df)
                 st.success(f"Google Drive 저장 완료: {saved}개 / 미생성 {skipped}개")
