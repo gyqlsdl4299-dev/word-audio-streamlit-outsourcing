@@ -702,7 +702,13 @@ def main() -> None:
     pages = sorted(df["worker_page"].astype(int).unique().tolist())
     default_page = int(st.session_state.get("current_page", first_incomplete_page(df)))
     default_page = min(max(default_page, min(pages)), max(pages))
-    page = st.number_input("엑셀 기준 페이지", min_value=min(pages), max_value=max(pages), value=default_page, step=1)
+    page_cols = st.columns([1.2, 1, 2.8])
+    with page_cols[0]:
+        page = st.number_input("엑셀 기준 페이지", min_value=min(pages), max_value=max(pages), value=default_page, step=1)
+    with page_cols[1]:
+        st.metric("전체 페이지", f"{len(pages):,}")
+    with page_cols[2]:
+        st.caption(f"현재 위치: {int(page):,} / {max(pages):,}페이지")
     st.session_state["current_page"] = int(page)
     page_df = page_rows(df, int(page))
 
