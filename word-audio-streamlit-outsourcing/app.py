@@ -14,6 +14,7 @@ from pathlib import Path
 
 import pandas as pd
 import streamlit as st
+import streamlit.components.v1 as components
 
 
 APP_ROOT = Path(__file__).resolve().parent
@@ -372,6 +373,43 @@ def build_page_zip(page_df: pd.DataFrame) -> bytes:
     return buffer.getvalue()
 
 
+def render_inline_play_button(audio_bytes: bytes, button_id: str) -> None:
+    encoded = base64.b64encode(audio_bytes).decode("ascii")
+    safe_id = re.sub(r"[^a-zA-Z0-9_-]", "_", button_id)
+    components.html(
+        f"""
+        <button id="btn_{safe_id}" style="
+            height:34px;
+            padding:0 12px;
+            border:1px solid #cbd5e1;
+            border-radius:6px;
+            background:#ffffff;
+            color:#0f172a;
+            font-size:13px;
+            cursor:pointer;
+        ">재생</button>
+        <span id="state_{safe_id}" style="margin-left:6px;font-size:12px;color:#64748b;"></span>
+        <audio id="audio_{safe_id}" preload="auto" src="data:audio/mpeg;base64,{encoded}"></audio>
+        <script>
+        const btn = document.getElementById("btn_{safe_id}");
+        const state = document.getElementById("state_{safe_id}");
+        const audio = document.getElementById("audio_{safe_id}");
+        btn.onclick = async () => {{
+            try {{
+                audio.currentTime = 0;
+                state.textContent = "재생중";
+                await audio.play();
+            }} catch (e) {{
+                state.textContent = "재생 실패";
+            }}
+        }};
+        audio.onended = () => {{ state.textContent = ""; }};
+        </script>
+        """,
+        height=42,
+    )
+
+
 def google_enabled() -> bool:
     return bool(
         (secret_text("GOOGLE_SERVICE_ACCOUNT_JSON_B64") or secret_value("GOOGLE_SERVICE_ACCOUNT_JSON", ""))
@@ -667,8 +705,8 @@ def render_rows(page_df: pd.DataFrame) -> None:
         cols[4].write(row["status"])
         key = row_key(row)
         with cols[5]:
-            if key in audios and st.button("재생", key=f"play_{index}"):
-                st.audio(audios[key], format="audio/mp3")
+            if key in audios:
+                render_inline_play_button(audios[key], f"play_{index}_{key}")
         with cols[6]:
             if st.button("이상 표시", key=f"issue_{index}"):
                 note = f"발음 이상 표시 {time.strftime('%Y-%m-%d %H:%M:%S')}"
@@ -682,8 +720,12 @@ def render_rows(page_df: pd.DataFrame) -> None:
         with cols[7]:
             if st.button("재생성", key=f"regen_{index}"):
                 try:
-                    regenerate_row(index, page_df)
-                    st.rerun()
+                    with st.spinner("재생성 중..."):
+                        regenerate_row(index, page_df)
+                    st.success("완료")
+                    new_key = row_key(get_df().loc[index])
+                    if new_key in get_audios():
+                        render_inline_play_button(get_audios()[new_key], f"regen_play_{index}_{new_key}")
                 except Exception as exc:
                     st.error(str(exc))
 
