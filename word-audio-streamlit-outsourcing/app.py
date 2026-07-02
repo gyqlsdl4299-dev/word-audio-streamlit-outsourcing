@@ -102,6 +102,17 @@ def dictionary_tts_text(word: str, pos: str = "") -> str:
     return f"{raw}."
 
 
+def dictionary_voice_settings(variation: int = 0) -> dict:
+    # Keep isolated headwords flat and dictionary-like. Regeneration changes only
+    # the seed, not expressive style, so it does not drift into conversational intonation.
+    return {
+        "stability": 1.0 if not variation else 0.92,
+        "similarity_boost": 0.55,
+        "style": 0.0,
+        "use_speaker_boost": False,
+    }
+
+
 def voice_label(voice: dict) -> str:
     raw_gender = str(voice.get("gender") or "").lower()
     if "female" in raw_gender or "woman" in raw_gender:
@@ -150,21 +161,10 @@ def list_elevenlabs_voices(api_key: str) -> list[dict]:
 
 def tts_request(api_key: str, voice_id: str, text: str, model_id: str, variation: int = 0) -> bytes:
     url = "https://api.elevenlabs.io/v1/text-to-speech/" + urllib.parse.quote(voice_id) + "?output_format=mp3_44100_128"
-    regen_profiles = [
-        {"stability": 0.42, "similarity_boost": 0.72, "style": 0.0, "use_speaker_boost": False},
-        {"stability": 0.30, "similarity_boost": 0.78, "style": 0.05, "use_speaker_boost": False},
-        {"stability": 0.55, "similarity_boost": 0.55, "style": 0.12, "use_speaker_boost": True},
-        {"stability": 0.24, "similarity_boost": 0.85, "style": 0.0, "use_speaker_boost": True},
-    ]
-    settings = (
-        {"stability": 0.95, "similarity_boost": 0.6, "style": 0.0, "use_speaker_boost": False}
-        if not variation
-        else regen_profiles[abs(int(variation)) % len(regen_profiles)]
-    )
     body = {
         "text": clean_text(text),
         "model_id": model_id or "eleven_multilingual_v2",
-        "voice_settings": settings,
+        "voice_settings": dictionary_voice_settings(variation),
     }
     if variation:
         body["seed"] = (int(time.time() * 1000) + variation * 7919) % 2147483647
