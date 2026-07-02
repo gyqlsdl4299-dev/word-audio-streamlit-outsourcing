@@ -266,6 +266,32 @@ def render_voice_selector() -> None:
         st.caption(f"적용됨: US {config['voice_us_label']} / UK {config['voice_uk_label']}")
 
 
+def render_google_diagnostics() -> None:
+    with st.expander("Google 연결 확인", expanded=False):
+        email = google_service_account_email()
+        st.write("앱이 사용하는 서비스 계정")
+        st.code(email or "서비스 계정 정보를 읽지 못했습니다.")
+        st.caption("이 이메일이 작업자1/2 Google Sheet와 음원 저장 폴더에 편집자로 공유되어 있어야 합니다.")
+        if st.button("Google Sheet 권한 테스트"):
+            try:
+                _drive, sheets = google_clients()
+                test_rows = []
+                for label, spreadsheet_id, sheet_name in [
+                    ("작업자1", secret_text("GOOGLE_SHEET_ID_WORKER_1"), secret_text("GOOGLE_WORKSHEET_NAME_WORKER_1", "worker_1_upload")),
+                    ("작업자2", secret_text("GOOGLE_SHEET_ID_WORKER_2"), secret_text("GOOGLE_WORKSHEET_NAME_WORKER_2", "worker_2_upload")),
+                ]:
+                    if not spreadsheet_id:
+                        test_rows.append({"대상": label, "결과": "시트 ID 없음"})
+                        continue
+                    meta = sheets.spreadsheets().get(spreadsheetId=spreadsheet_id).execute()
+                    titles = [sheet["properties"]["title"] for sheet in meta.get("sheets", [])]
+                    values = sheets.spreadsheets().values().get(spreadsheetId=spreadsheet_id, range=f"{sheet_name}!A1:A1").execute()
+                    test_rows.append({"대상": label, "결과": "접근 가능", "탭 목록": ", ".join(titles), "A1": values.get("values", [[""]])[0][0] if values.get("values") else ""})
+                st.dataframe(pd.DataFrame(test_rows), use_container_width=True)
+            except Exception as exc:
+                st.error(str(exc))
+
+
 def page_rows(df: pd.DataFrame, page: int) -> pd.DataFrame:
     page_df = df[df["worker_page"] == page].copy()
     if page_df.empty:
@@ -421,15 +447,25 @@ def google_clients():
     from google.oauth2 import service_account
     from googleapiclient.discovery import build
 
-    raw_b64 = secret_text("GOOGLE_SERVICE_ACCOUNT_JSON_B64")
-    if raw_b64:
-        info = json.loads(base64.b64decode(raw_b64).decode("utf-8"))
-    else:
-        raw = secret_value("GOOGLE_SERVICE_ACCOUNT_JSON", "")
-        info = json.loads(raw) if isinstance(raw, str) else dict(raw)
+    info = google_service_account_info()
     scopes = ["https://www.googleapis.com/auth/drive.file", "https://www.googleapis.com/auth/spreadsheets"]
     creds = service_account.Credentials.from_service_account_info(info, scopes=scopes)
     return build("drive", "v3", credentials=creds), build("sheets", "v4", credentials=creds)
+
+
+def google_service_account_info() -> dict:
+    raw_b64 = secret_text("GOOGLE_SERVICE_ACCOUNT_JSON_B64")
+    if raw_b64:
+        return json.loads(base64.b64decode(raw_b64).decode("utf-8"))
+    raw = secret_value("GOOGLE_SERVICE_ACCOUNT_JSON", "")
+    return json.loads(raw) if isinstance(raw, str) else dict(raw)
+
+
+def google_service_account_email() -> str:
+    try:
+        return clean_text(google_service_account_info().get("client_email", ""))
+    except Exception:
+        return ""
 
 
 def col_letter(index: int) -> str:
@@ -753,6 +789,8 @@ def main() -> None:
 
     with st.expander("2. 성우 선택 / 미리듣기", expanded=current_voice_config() is None):
         render_voice_selector()
+
+    render_google_diagnostics()
 
     df = get_df()
     if df is None:
