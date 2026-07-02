@@ -1,45 +1,40 @@
-# 0623 단어 음원 외주 검수 Streamlit 앱
+# 단어 음원 외주 검수 Streamlit 앱
 
-외주자가 URL로 접속해서 작업자 1/2 범위의 음원을 검수하고, 현재 페이지 ZIP을 다운로드하는 Streamlit 배포용 앱입니다.
+DB 파일을 배포하지 않고, 업로드한 엑셀을 기준으로 음원을 생성/검수하는 Streamlit 앱입니다.
 
 ## 포함 기능
 
-- 작업자 1: 전체 101~353페이지
-- 작업자 2: 전체 354~606페이지
-- 작업자별 American / British 성우 선택
-- ElevenLabs 성우 성별 표시 및 미리듣기
+- 검수 엑셀 업로드
+- 업로드 엑셀 기준 50개 단위 페이지 검수
+- ElevenLabs American / British 성우 선택 및 미리듣기
 - 선택 성우 적용 후 현재 페이지 생성
-- 선택 성우로 현재 페이지 전체 재생성
+- 현재 페이지 전체 재생성
 - 행별 개별 재생성
-- 현재 페이지 음원 재생
-- 이상 표시 / 이상 해제
-- 재사용 예정 목록 분리
+- 같은 `pronunciation_key`는 페이지 안에서 같은 음원을 재사용
+- Gemini로 현재 페이지 발음 재사용 키 보정
 - 현재 페이지 ZIP 다운로드
-- ZIP 안에 `page_log.csv`, `issues.csv` 포함
+- Google Drive 설정 시 현재 페이지 음원 자동 업로드
+- Google Sheets 설정 시 저장완료 / 이상표시 자동 반영
 
-## 데이터 배치
+## Streamlit Cloud Secrets
 
-앱은 아래 위치 중 하나에서 데이터를 찾습니다.
+API Key는 GitHub에 올리지 말고 Streamlit Cloud의 App settings > Secrets에 넣으세요.
 
-1. `./data/word_audio.sqlite3`
-2. 형제 폴더 `../word-audio-app/data/word_audio.sqlite3`
-3. Streamlit Secrets 또는 환경변수의 `DATA_DIR`
+```toml
+ELEVENLABS_API_KEY = "xi-..."
+GEMINI_API_KEY = "..."
 
-Streamlit Cloud에 올릴 때는 repo 안에 다음 구조가 필요합니다.
-
-```text
-word-audio-streamlit-outsourcing
-├─ app.py
-├─ requirements.txt
-└─ data
-   ├─ word_audio.sqlite3
-   └─ audio
-      └─ baa4b56a8fb4
-         ├─ US
-         └─ UK
+# Google 자동 저장을 쓸 때만 필요
+GOOGLE_SERVICE_ACCOUNT_JSON = "{...}"
+GOOGLE_DRIVE_FOLDER_ID = "구글드라이브폴더ID"
+GOOGLE_SHEET_ID_WORKER_1 = "작업자1_구글시트ID"
+GOOGLE_WORKSHEET_NAME_WORKER_1 = "worker_1_upload"
+GOOGLE_SHEET_ID_WORKER_2 = "작업자2_구글시트ID"
+GOOGLE_WORKSHEET_NAME_WORKER_2 = "worker_2_upload"
+GOOGLE_ISSUE_SHEET_NAME = "Issues"
 ```
 
-주의: 현재 DB 파일이 100MB를 넘을 수 있어 GitHub 일반 업로드 제한에 걸릴 수 있습니다. 이 경우 Git LFS, S3/R2, Google Drive 다운로드 방식, 또는 VPS 배포가 필요합니다.
+Google Drive/Sheets 자동 연동을 쓰려면 서비스 계정 이메일을 저장 폴더와 Google Sheet에 공유 권한으로 추가해야 합니다.
 
 ## 로컬 실행
 
@@ -47,20 +42,17 @@ word-audio-streamlit-outsourcing
 streamlit run app.py
 ```
 
-## Streamlit Cloud 배포
+## 배포
 
-1. GitHub repo 생성
-2. 이 폴더의 파일 업로드
-3. Streamlit Cloud에서 repo 연결
-4. Main file path: `app.py`
-5. 필요한 경우 App settings > Secrets에 값 추가
+Streamlit Cloud에서 GitHub repo를 연결하고 Main file path에 `app.py`를 지정합니다.
 
-실제 API Key는 GitHub에 올리지 마세요.
+GitHub에 올릴 파일:
 
-Secrets 예시는 아래와 같습니다.
+- `app.py`
+- `requirements.txt`
+- `README.md`
+- `.streamlit/secrets.toml.example`
 
-```toml
-ELEVENLABS_API_KEY = "xi-..."
-GEMINI_API_KEY = "..."
-# DATA_DIR = "/mount/path/data"
-```
+올리면 안 되는 파일:
+
+- `.streamlit/secrets.toml`
