@@ -713,6 +713,11 @@ def upload_audio_via_apps_script(file_name: str, audio_bytes: bytes) -> str:
             result = json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode("utf-8", errors="replace")
+        if exc.code == 403 and ("Access Denied" in detail or "DOCTYPE html" in detail):
+            raise RuntimeError(
+                "Apps Script 접근이 차단되었습니다. Apps Script 배포 설정에서 "
+                "'실행 사용자: 나', '액세스 권한: 모든 사용자'로 배포한 뒤 새 웹 앱 URL을 Secrets에 넣어 주세요."
+            ) from exc
         raise RuntimeError(f"Apps Script upload {exc.code}: {detail[:500]}") from exc
     if not result.get("ok"):
         raise RuntimeError(f"Apps Script upload failed: {result}")
