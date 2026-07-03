@@ -682,6 +682,88 @@ def append_issue_sheet(row: pd.Series, note: str) -> None:
     ).execute()
 
 
+def batch_update_google_sheet(row_updates: list[tuple[pd.Series, dict]]) -> None:
+    if not row_updates:
+        return
+    grouped: dict[tuple[str, str], list[tuple[pd.Series, dict]]] = {}
+    required_columns = {"status", "issue_note", "saved_at", "drive_url"}
+    for row, updates in row_updates:
+        spreadsheet_id, sheet_name = google_sheet_target(row)
+        if not spreadsheet_id:
+            continue
+        required_columns.update(updates.keys())
+        grouped.setdefault((spreadsheet_id, sheet_name), []).append((row, updates))
+
+    for (spreadsheet_id, sheet_name), items in grouped.items():
+        _, sheets = google_clients()
+        headers = ensure_sheet_columns(sheets, spreadsheet_id, sheet_name, list(required_columns))
+        values = sheets.spreadsheets().values().get(
+            spreadsheetId=spreadsheet_id,
+            range=f"{sheet_name}!A1:{col_letter(len(headers) - 1)}",
+        ).execute().get("values", [])
+        audio_col = headers.index("audio_id") if "audio_id" in headers else -1
+        file_col = headers.index("file_name") if "file_name" in headers else -1
+        rows_by_audio = {}
+        rows_by_file = {}
+        for pos, sheet_row in enumerate(values[1:], start=2):
+            if audio_col >= 0 and audio_col < len(sheet_row):
+                rows_by_audio[clean_text(sheet_row[audio_col])] = pos
+            if file_col >= 0 and file_col < len(sheet_row):
+                rows_by_file[clean_text(sheet_row[file_col])] = pos
+
+        data = []
+        for row, updates in items:
+            target_row = rows_by_audio.get(clean_text(row.get("audio_id"))) or rows_by_file.get(clean_text(row.get("file_name")))
+            if not target_row:
+                continue
+            for key, value in updates.items():
+                if key not in headers:
+                    continue
+                col = headers.index(key)
+                data.append({
+                    "range": f"{sheet_name}!{col_letter(col)}{target_row}",
+                    "values": [[sheet_value(value)]],
+                })
+        if data:
+            sheets.spreadsheets().values().batchUpdate(
+                spreadsheetId=spreadsheet_id,
+                body={"valueInputOption": "RAW", "data": data},
+            ).execute()
+
+
+def append_issue_sheets(issue_rows: list[tuple[pd.Series, str]]) -> None:
+    if not issue_rows:
+        return
+    grouped: dict[str, list[list]] = {}
+    for row, note in issue_rows:
+        spreadsheet_id, _sheet_name = google_sheet_target(row)
+        if not spreadsheet_id:
+            continue
+        grouped.setdefault(spreadsheet_id, []).append([
+            sheet_value(item)
+            for item in [
+                time.strftime("%Y-%m-%d %H:%M:%S"),
+                row.get("worker_label", ""),
+                row.get("worker_page", ""),
+                row.get("word", ""),
+                row.get("sense_code", ""),
+                row.get("accent", ""),
+                row.get("file_name", ""),
+                note,
+            ]
+        ])
+    for spreadsheet_id, values in grouped.items():
+        _, sheets = google_clients()
+        issue_sheet = secret_text("GOOGLE_ISSUE_SHEET_NAME", "Issues")
+        sheets.spreadsheets().values().append(
+            spreadsheetId=spreadsheet_id,
+            range=f"{issue_sheet}!A:H",
+            valueInputOption="RAW",
+            insertDataOption="INSERT_ROWS",
+            body={"values": values},
+        ).execute()
+
+
 def append_progress_sheet(page_df: pd.DataFrame, saved: int, skipped: int) -> None:
     if page_df.empty:
         return
@@ -712,7 +794,7 @@ def append_progress_sheet(page_df: pd.DataFrame, saved: int, skipped: int) -> No
     ).execute()
 
 
-def upload_audio_via_apps_script(file_name: str, audio_bytes: bytes) -> str:
+def upload_file_via_apps_script(file_name: str, file_bytes: bytes, mime_type: str = "audio/mpeg") -> str:
     url = secret_text("GOOGLE_APPS_SCRIPT_UPLOAD_URL")
     token = secret_text("GOOGLE_APPS_SCRIPT_TOKEN")
     if not url:
@@ -720,8 +802,8 @@ def upload_audio_via_apps_script(file_name: str, audio_bytes: bytes) -> str:
     payload = {
         "token": token,
         "file_name": file_name,
-        "mime_type": "audio/mpeg",
-        "content_b64": base64.b64encode(audio_bytes).decode("ascii"),
+        "mime_type": mime_type,
+        "content_b64": base64.b64encode(file_bytes).decode("ascii"),
     }
     request = urllib.request.Request(
         url,
@@ -745,6 +827,10 @@ def upload_audio_via_apps_script(file_name: str, audio_bytes: bytes) -> str:
     return clean_text(result.get("url") or result.get("webViewLink") or "")
 
 
+def upload_audio_via_apps_script(file_name: str, audio_bytes: bytes) -> str:
+    return upload_file_via_apps_script(file_name, audio_bytes, "audio/mpeg")
+
+
 def save_page_to_google(page_df: pd.DataFrame) -> tuple[int, int]:
     use_apps_script = bool(secret_text("GOOGLE_APPS_SCRIPT_UPLOAD_URL"))
     if not use_apps_script and not google_enabled():
@@ -758,14 +844,14 @@ def save_page_to_google(page_df: pd.DataFrame) -> tuple[int, int]:
     audios = get_audios()
     saved = 0
     skipped = 0
-    issues = 0
+    sheet_updates = []
+    issue_rows = []
     for index, row in page_df.iterrows():
         if clean_text(row.get("status")) == "이상표시":
             note = clean_text(row.get("issue_note")) or f"발음 이상 표시 {time.strftime('%Y-%m-%d %H:%M:%S')}"
-            update_google_sheet(row, {"status": "이상표시", "issue_note": note})
-            append_issue_sheet(row, note)
+            sheet_updates.append((row, {"status": "이상표시", "issue_note": note}))
+            issue_rows.append((row, note))
             skipped += 1
-            issues += 1
             continue
         key = row_key(row)
         if key not in audios:
@@ -784,8 +870,10 @@ def save_page_to_google(page_df: pd.DataFrame) -> tuple[int, int]:
             drive_url = file.get("webViewLink", "")
         now = time.strftime("%Y-%m-%d %H:%M:%S")
         update_rows([index], status="저장완료", saved_at=now, drive_url=drive_url)
-        update_google_sheet(row, {"status": "저장완료", "saved_at": now, "drive_url": drive_url})
+        sheet_updates.append((row, {"status": "저장완료", "saved_at": now, "drive_url": drive_url}))
         saved += 1
+    batch_update_google_sheet(sheet_updates)
+    append_issue_sheets(issue_rows)
     append_progress_sheet(page_df, saved, skipped)
     return saved, skipped
 
@@ -795,12 +883,14 @@ def submit_page_zip_status(page_df: pd.DataFrame) -> tuple[int, int]:
     saved = 0
     skipped = 0
     now = time.strftime("%Y-%m-%d %H:%M:%S")
+    sheet_updates = []
+    issue_rows = []
     for index, row in page_df.iterrows():
         if clean_text(row.get("status")) == "이상표시":
             note = clean_text(row.get("issue_note")) or f"발음 이상 표시 {now}"
             update_rows([index], status="이상표시", issue_note=note)
-            update_google_sheet(row, {"status": "이상표시", "issue_note": note})
-            append_issue_sheet(row, note)
+            sheet_updates.append((row, {"status": "이상표시", "issue_note": note}))
+            issue_rows.append((row, note))
             skipped += 1
             continue
         key = row_key(row)
@@ -808,10 +898,46 @@ def submit_page_zip_status(page_df: pd.DataFrame) -> tuple[int, int]:
             skipped += 1
             continue
         update_rows([index], status="저장완료", saved_at=now, drive_url="ZIP 다운로드")
-        update_google_sheet(row, {"status": "저장완료", "saved_at": now, "drive_url": "ZIP 다운로드"})
+        sheet_updates.append((row, {"status": "저장완료", "saved_at": now, "drive_url": "ZIP 다운로드"}))
         saved += 1
+    batch_update_google_sheet(sheet_updates)
+    append_issue_sheets(issue_rows)
     append_progress_sheet(page_df, saved, skipped)
     return saved, skipped
+
+
+def submit_page_zip_to_drive(page_df: pd.DataFrame, page: int) -> tuple[int, int, str]:
+    if not secret_text("GOOGLE_APPS_SCRIPT_UPLOAD_URL"):
+        raise RuntimeError("Google Drive ZIP 저장을 쓰려면 GOOGLE_APPS_SCRIPT_UPLOAD_URL이 필요합니다.")
+    zip_bytes = build_page_zip(page_df)
+    file_name = f"page_{int(page):03d}_audio.zip"
+    drive_url = upload_file_via_apps_script(file_name, zip_bytes, "application/zip")
+
+    audios = get_audios()
+    saved = 0
+    skipped = 0
+    now = time.strftime("%Y-%m-%d %H:%M:%S")
+    sheet_updates = []
+    issue_rows = []
+    for index, row in page_df.iterrows():
+        if clean_text(row.get("status")) == "이상표시":
+            note = clean_text(row.get("issue_note")) or f"발음 이상 표시 {now}"
+            update_rows([index], status="이상표시", issue_note=note)
+            sheet_updates.append((row, {"status": "이상표시", "issue_note": note}))
+            issue_rows.append((row, note))
+            skipped += 1
+            continue
+        key = row_key(row)
+        if key not in audios:
+            skipped += 1
+            continue
+        update_rows([index], status="저장완료", saved_at=now, drive_url=drive_url)
+        sheet_updates.append((row, {"status": "저장완료", "saved_at": now, "drive_url": drive_url}))
+        saved += 1
+    batch_update_google_sheet(sheet_updates)
+    append_issue_sheets(issue_rows)
+    append_progress_sheet(page_df, saved, skipped)
+    return saved, skipped, drive_url
 
 
 def handle_zip_status_submit(page_df: pd.DataFrame) -> None:
@@ -967,7 +1093,7 @@ def main() -> None:
             st.error(str(exc))
     with action_cols[3]:
         st.download_button(
-            "현재 페이지 ZIP",
+            "로컬 ZIP 저장",
             build_page_zip(page_df),
             file_name=f"page_{int(page):03d}.zip",
             mime="application/zip",
@@ -975,17 +1101,28 @@ def main() -> None:
             on_click=handle_zip_status_submit,
             args=(page_df.copy(),),
         )
-    if action_cols[4].button("시트만 반영", use_container_width=True):
+    if action_cols[4].button("Google ZIP 저장", use_container_width=True):
         try:
-            saved, skipped = submit_page_zip_status(page_df)
-            st.success(f"ZIP 기준 시트 반영 완료: 저장완료 {saved}개 / 이상·미생성 {skipped}개")
+            saved, skipped, drive_url = submit_page_zip_to_drive(page_df, int(page))
+            st.session_state["google_zip_message"] = f"Google Drive ZIP 저장 완료: 저장완료 {saved}개 / 이상·미생성 {skipped}개"
+            st.session_state["google_zip_url"] = drive_url
+            st.session_state.pop("google_zip_error", None)
             st.rerun()
         except Exception as exc:
-            st.error(str(exc))
+            st.session_state["google_zip_error"] = str(exc)
+            st.session_state.pop("google_zip_message", None)
+            st.session_state.pop("google_zip_url", None)
+            st.rerun()
     if st.session_state.get("zip_submit_message"):
         st.success(st.session_state.pop("zip_submit_message"))
     if st.session_state.get("zip_submit_error"):
         st.error(st.session_state.pop("zip_submit_error"))
+    if st.session_state.get("google_zip_message"):
+        st.success(st.session_state.pop("google_zip_message"))
+    if st.session_state.get("google_zip_url"):
+        st.link_button("저장된 ZIP 열기", st.session_state.pop("google_zip_url"))
+    if st.session_state.get("google_zip_error"):
+        st.error(st.session_state.pop("google_zip_error"))
     with action_cols[5]:
         output = io.BytesIO()
         df.to_excel(output, index=False)
