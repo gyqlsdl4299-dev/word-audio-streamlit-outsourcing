@@ -484,6 +484,29 @@ def build_page_zip(page_df: pd.DataFrame) -> bytes:
     return buffer.getvalue()
 
 
+def page_audio_stats(page_df: pd.DataFrame) -> tuple[int, int, int]:
+    audios = get_audios()
+    ready = 0
+    savable = 0
+    issue = 0
+    for _, row in page_df.iterrows():
+        if clean_text(row.get("status")) == "이상표시":
+            issue += 1
+            continue
+        savable += 1
+        if row_key(row) in audios:
+            ready += 1
+    return ready, savable, issue
+
+
+def validate_page_zip_ready(page_df: pd.DataFrame) -> None:
+    ready, savable, _ = page_audio_stats(page_df)
+    if savable <= 0:
+        raise RuntimeError("저장할 정상 음원이 없습니다. 모든 행이 이상표시 상태인지 확인해 주세요.")
+    if ready < savable:
+        raise RuntimeError(f"현재 페이지 음원 {savable}개 중 {ready}개만 생성되어 있습니다. 먼저 '현재 페이지 생성'을 완료해 주세요.")
+
+
 def page_zip_file_name(page_df: pd.DataFrame, page: int, for_drive: bool = False) -> str:
     worker_id = "unknown"
     if not page_df.empty:
@@ -923,6 +946,7 @@ def save_page_to_google(page_df: pd.DataFrame) -> tuple[int, int]:
 
 
 def submit_page_zip_status(page_df: pd.DataFrame) -> tuple[int, int]:
+    validate_page_zip_ready(page_df)
     audios = get_audios()
     saved = 0
     skipped = 0
@@ -953,6 +977,7 @@ def submit_page_zip_status(page_df: pd.DataFrame) -> tuple[int, int]:
 def submit_page_zip_to_drive(page_df: pd.DataFrame, page: int) -> tuple[int, int, str]:
     if not secret_text("GOOGLE_APPS_SCRIPT_UPLOAD_URL"):
         raise RuntimeError("Google Drive ZIP 저장을 쓰려면 GOOGLE_APPS_SCRIPT_UPLOAD_URL이 필요합니다.")
+    validate_page_zip_ready(page_df)
     zip_bytes = build_page_zip(page_df)
     file_name = page_zip_file_name(page_df, page, for_drive=True)
     drive_url = upload_file_via_apps_script(file_name, zip_bytes, "application/zip")
@@ -1197,7 +1222,8 @@ def main() -> None:
 
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("현재 페이지 행", len(page_df))
-    c2.metric("생성됨", sum(row_key(row) in get_audios() for _, row in page_df.iterrows()))
+    ready_audio_count, savable_audio_count, issue_audio_count = page_audio_stats(page_df)
+    c2.metric("생성됨", f"{ready_audio_count}/{savable_audio_count}")
     c3.metric("이상표시", int((df["status"] == "이상표시").sum()))
     c4.metric("저장완료", int((df["status"] == "저장완료").sum()))
 
@@ -1224,16 +1250,26 @@ def main() -> None:
         except Exception as exc:
             st.error(str(exc))
     with action_cols[3]:
-        st.download_button(
-            "로컬 ZIP 저장",
-            build_page_zip(page_df),
-            file_name=page_zip_file_name(page_df, int(page)),
-            mime="application/zip",
-            use_container_width=True,
-            on_click=handle_zip_status_submit,
-            args=(page_df.copy(),),
-        )
-    if action_cols[4].button("Google ZIP 저장", use_container_width=True):
+        zip_ready = savable_audio_count > 0 and ready_audio_count >= savable_audio_count
+        if zip_ready:
+            st.download_button(
+                "로컬 ZIP 저장",
+                build_page_zip(page_df),
+                file_name=page_zip_file_name(page_df, int(page)),
+                mime="application/zip",
+                use_container_width=True,
+                on_click=handle_zip_status_submit,
+                args=(page_df.copy(),),
+            )
+        else:
+            st.button(
+                "로컬 ZIP 저장",
+                use_container_width=True,
+                disabled=True,
+                help=f"저장 가능 음원 {savable_audio_count}개 중 {ready_audio_count}개 생성됨",
+            )
+    google_zip_ready = savable_audio_count > 0 and ready_audio_count >= savable_audio_count
+    if action_cols[4].button("Google ZIP 저장", use_container_width=True, disabled=not google_zip_ready):
         try:
             saved, skipped, drive_url = submit_page_zip_to_drive(page_df, int(page))
             st.session_state["google_zip_message"] = f"Google Drive ZIP 저장 완료: 저장완료 {saved}개 / 이상·미생성 {skipped}개"
@@ -1245,6 +1281,8 @@ def main() -> None:
             st.session_state.pop("google_zip_message", None)
             st.session_state.pop("google_zip_url", None)
             st.rerun()
+    if not google_zip_ready:
+        action_cols[5].caption(f"ZIP 저장 전 현재 페이지 생성 필요: {ready_audio_count}/{savable_audio_count}개 생성됨")
     if st.session_state.get("zip_submit_message"):
         st.success(st.session_state.pop("zip_submit_message"))
     if st.session_state.get("zip_submit_error"):
