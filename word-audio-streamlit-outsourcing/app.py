@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import hashlib
+import html
 import json
 import os
 import re
@@ -996,35 +997,123 @@ def analyze_page_with_gemini(page_df: pd.DataFrame) -> int:
     return len(updates)
 
 
+def badge_html(label: str, bg: str, fg: str, border: str = "transparent") -> str:
+    safe_label = html.escape(clean_text(label))
+    return (
+        f'<span style="display:inline-flex;align-items:center;justify-content:center;'
+        f'min-width:54px;padding:5px 9px;border-radius:999px;'
+        f'background:{bg};color:{fg};border:1px solid {border};'
+        f'font-size:12px;font-weight:700;line-height:1;white-space:nowrap;">{safe_label}</span>'
+    )
+
+
+def status_badge_html(status: str) -> str:
+    value = clean_text(status) or "pending"
+    if value == "저장완료":
+        return badge_html(value, "#dcfce7", "#166534", "#bbf7d0")
+    if value == "이상표시":
+        return badge_html(value, "#fee2e2", "#991b1b", "#fecaca")
+    if value == "검수중":
+        return badge_html(value, "#dbeafe", "#1d4ed8", "#bfdbfe")
+    if value == "재사용 예정":
+        return badge_html(value, "#f1f5f9", "#475569", "#e2e8f0")
+    return badge_html(value, "#fff7ed", "#c2410c", "#fed7aa")
+
+
+def accent_badge_html(accent: str) -> str:
+    value = clean_text(accent).upper()
+    if value == "US":
+        return badge_html("US", "#eff6ff", "#1d4ed8", "#bfdbfe")
+    if value == "UK":
+        return badge_html("UK", "#f5f3ff", "#6d28d9", "#ddd6fe")
+    return badge_html(value or "-", "#f8fafc", "#475569", "#e2e8f0")
+
+
 def render_rows(page_df: pd.DataFrame) -> None:
     audios = get_audios()
     if page_df.empty:
         st.info("표시할 행이 없습니다.")
         return
-    for index, row in page_df.iterrows():
-        cols = st.columns([2.0, 1.1, 0.7, 2.8, 1.0, 1.0, 1.0, 1.0])
-        cols[0].markdown(f"**{row['word']}**  \n<small>{row['pos']}</small>", unsafe_allow_html=True)
-        cols[1].write(row["sense_code"])
-        cols[2].write(row["accent"])
-        cols[3].caption(row["file_name"])
-        cols[4].write(row["status"])
+
+    st.markdown(
+        """
+        <style>
+        .review-head {
+            color:#475569; font-size:12px; font-weight:800;
+            padding:0 6px 6px 6px;
+        }
+        .review-word {font-size:15px;font-weight:800;color:#0f172a;line-height:1.25;}
+        .review-meta {font-size:12px;color:#64748b;line-height:1.35;margin-top:2px;}
+        .review-file {font-size:12px;color:#64748b;line-height:1.35;word-break:break-all;}
+        .row-number {
+            width:34px;height:34px;border-radius:8px;background:#f8fafc;
+            border:1px solid #e2e8f0;color:#475569;display:flex;
+            align-items:center;justify-content:center;font-size:12px;font-weight:800;
+        }
+        div[data-testid="stVerticalBlockBorderWrapper"] {
+            border-color:#dbe3ef !important;
+            box-shadow:0 1px 2px rgba(15,23,42,0.04);
+        }
+        div[data-testid="stVerticalBlockBorderWrapper"]:hover {
+            border-color:#94a3b8 !important;
+            background:#fbfdff;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    header = st.columns([0.45, 1.8, 1.25, 0.75, 2.7, 1.05, 0.9, 1.05, 1.05])
+    for col, label in zip(header, ["", "표제어", "Sense", "발음", "파일명", "상태", "재생", "검수", "재생성"]):
+        col.markdown(f'<div class="review-head">{label}</div>', unsafe_allow_html=True)
+
+    for position, (index, row) in enumerate(page_df.iterrows(), start=1):
         key = row_key(row)
-        with cols[6]:
-            if st.button("이상 표시", key=f"issue_{index}"):
-                note = f"발음 이상 표시 {time.strftime('%Y-%m-%d %H:%M:%S')}"
-                update_rows([index], status="이상표시", issue_note=note)
-                st.rerun()
-        with cols[7]:
-            if st.button("재생성", key=f"regen_{index}"):
-                try:
-                    regenerate_row(index, page_df)
-                    st.toast("재생성 완료")
-                except Exception as exc:
-                    st.error(str(exc))
-        with cols[5]:
-            if key in audios:
-                audio_hash = str(abs(hash(audios[key])))[-10:]
-                render_inline_play_button(audios[key], f"play_{index}_{key}_{audio_hash}")
+        status = clean_text(row.get("status"))
+        with st.container(border=True):
+            cols = st.columns([0.45, 1.8, 1.25, 0.75, 2.7, 1.05, 0.9, 1.05, 1.05])
+            row_no = clean_text(row.get("page_row")) or str(position)
+            cols[0].markdown(f'<div class="row-number">{html.escape(row_no)}</div>', unsafe_allow_html=True)
+            cols[1].markdown(
+                f'<div class="review-word">{html.escape(clean_text(row.get("word")))}</div>'
+                f'<div class="review-meta">{html.escape(clean_text(row.get("pos")))}</div>',
+                unsafe_allow_html=True,
+            )
+            cols[2].markdown(
+                f'<div class="review-meta"><b>{html.escape(clean_text(row.get("sense_code")))}</b></div>'
+                f'<div class="review-meta">ID {html.escape(clean_text(row.get("audio_id")))}</div>',
+                unsafe_allow_html=True,
+            )
+            cols[3].markdown(accent_badge_html(row.get("accent")), unsafe_allow_html=True)
+            cols[4].markdown(f'<div class="review-file">{html.escape(clean_text(row.get("file_name")))}</div>', unsafe_allow_html=True)
+            cols[5].markdown(status_badge_html(status), unsafe_allow_html=True)
+
+            with cols[6]:
+                if key in audios:
+                    audio_hash = str(abs(hash(audios[key])))[-10:]
+                    render_inline_play_button(audios[key], f"play_{index}_{key}_{audio_hash}")
+                else:
+                    st.caption("미생성")
+
+            with cols[7]:
+                is_issue = status == "이상표시"
+                issue_label = "이상 해제" if is_issue else "이상 표시"
+                if st.button(issue_label, key=f"issue_{index}", use_container_width=True):
+                    if is_issue:
+                        update_rows([index], status="검수중", issue_note="")
+                    else:
+                        note = f"발음 이상 표시 {time.strftime('%Y-%m-%d %H:%M:%S')}"
+                        update_rows([index], status="이상표시", issue_note=note)
+                    st.rerun()
+
+            with cols[8]:
+                if st.button("재생성", key=f"regen_{index}", use_container_width=True):
+                    try:
+                        regenerate_row(index, page_df)
+                        st.toast("재생성 완료")
+                        st.rerun()
+                    except Exception as exc:
+                        st.error(str(exc))
 
 
 def main() -> None:
