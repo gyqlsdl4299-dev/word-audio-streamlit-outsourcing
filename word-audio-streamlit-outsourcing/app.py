@@ -449,6 +449,15 @@ def build_page_zip(page_df: pd.DataFrame) -> bytes:
     return buffer.getvalue()
 
 
+def page_zip_file_name(page_df: pd.DataFrame, page: int, for_drive: bool = False) -> str:
+    worker_id = "unknown"
+    if not page_df.empty:
+        worker_id = clean_text(page_df.iloc[0].get("worker_id")) or worker_id
+    worker_id = re.sub(r"[^0-9A-Za-z_-]+", "_", worker_id).strip("_") or "unknown"
+    suffix = "_audio" if for_drive else ""
+    return f"worker_{worker_id}_page_{int(page):03d}{suffix}.zip"
+
+
 def render_inline_play_button(audio_bytes: bytes, button_id: str) -> None:
     encoded = base64.b64encode(audio_bytes).decode("ascii")
     safe_id = re.sub(r"[^a-zA-Z0-9_-]", "_", button_id)
@@ -910,7 +919,7 @@ def submit_page_zip_to_drive(page_df: pd.DataFrame, page: int) -> tuple[int, int
     if not secret_text("GOOGLE_APPS_SCRIPT_UPLOAD_URL"):
         raise RuntimeError("Google Drive ZIP 저장을 쓰려면 GOOGLE_APPS_SCRIPT_UPLOAD_URL이 필요합니다.")
     zip_bytes = build_page_zip(page_df)
-    file_name = f"page_{int(page):03d}_audio.zip"
+    file_name = page_zip_file_name(page_df, page, for_drive=True)
     drive_url = upload_file_via_apps_script(file_name, zip_bytes, "application/zip")
 
     audios = get_audios()
@@ -1095,7 +1104,7 @@ def main() -> None:
         st.download_button(
             "로컬 ZIP 저장",
             build_page_zip(page_df),
-            file_name=f"page_{int(page):03d}.zip",
+            file_name=page_zip_file_name(page_df, int(page)),
             mime="application/zip",
             use_container_width=True,
             on_click=handle_zip_status_submit,
