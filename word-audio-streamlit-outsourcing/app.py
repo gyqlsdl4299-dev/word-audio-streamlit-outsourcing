@@ -70,6 +70,24 @@ def clean_text(value) -> str:
     return re.sub(r"\s+", " ", str(value)).strip()
 
 
+def sheet_value(value):
+    if value is None:
+        return ""
+    try:
+        if pd.isna(value):
+            return ""
+    except (TypeError, ValueError):
+        pass
+    if hasattr(value, "item"):
+        try:
+            value = value.item()
+        except (TypeError, ValueError):
+            pass
+    if isinstance(value, (list, tuple, set, dict)):
+        return json.dumps(value, ensure_ascii=False, default=str)
+    return value
+
+
 def slug(value: str) -> str:
     value = clean_text(value)
     value = re.sub(r'[\\/:*?"<>|]+', "_", value)
@@ -644,7 +662,7 @@ def update_google_sheet(row: pd.Series, updates: dict) -> None:
             spreadsheetId=spreadsheet_id,
             range=f"{sheet_name}!{col_letter(col)}{target_row}",
             valueInputOption="RAW",
-            body={"values": [[value]]},
+            body={"values": [[sheet_value(value)]]},
         ).execute()
 
 
@@ -654,7 +672,7 @@ def append_issue_sheet(row: pd.Series, note: str) -> None:
     if not spreadsheet_id:
         return
     _, sheets = google_clients()
-    values = [[time.strftime("%Y-%m-%d %H:%M:%S"), row.get("worker_label", ""), row.get("worker_page", ""), row.get("word", ""), row.get("sense_code", ""), row.get("accent", ""), row.get("file_name", ""), note]]
+    values = [[sheet_value(item) for item in [time.strftime("%Y-%m-%d %H:%M:%S"), row.get("worker_label", ""), row.get("worker_page", ""), row.get("word", ""), row.get("sense_code", ""), row.get("accent", ""), row.get("file_name", ""), note]]]
     sheets.spreadsheets().values().append(
         spreadsheetId=spreadsheet_id,
         range=f"{issue_sheet}!A:H",
@@ -675,7 +693,7 @@ def append_progress_sheet(page_df: pd.DataFrame, saved: int, skipped: int) -> No
     headers = ["submitted_at", "worker_id", "worker_label", "worker_page", "global_page", "total_rows", "saved", "skipped_or_issue"]
     ensure_sheet_exists(sheets, spreadsheet_id, progress_sheet, headers)
     first = page_df.iloc[0]
-    values = [[
+    values = [[sheet_value(item) for item in [
         time.strftime("%Y-%m-%d %H:%M:%S"),
         first.get("worker_id", ""),
         first.get("worker_label", ""),
@@ -684,7 +702,7 @@ def append_progress_sheet(page_df: pd.DataFrame, saved: int, skipped: int) -> No
         len(page_df),
         saved,
         skipped,
-    ]]
+    ]]]
     sheets.spreadsheets().values().append(
         spreadsheetId=spreadsheet_id,
         range=f"{progress_sheet}!A:H",
