@@ -162,7 +162,10 @@ def preferred_voice_options(voices: list[dict], accent: str) -> dict[str, dict]:
     options = {}
     by_name = {clean_text(voice.get("name")).lower(): voice for voice in voices}
     for voice_name, label in PREFERRED_VOICE_OPTIONS[accent]:
-        voice = by_name.get(voice_name.lower())
+        target = voice_name.lower()
+        voice = by_name.get(target)
+        if not voice:
+            voice = next((v for v in voices if clean_text(v.get("name")).lower().startswith(target)), None)
         if voice:
             options[label] = voice
     return options
