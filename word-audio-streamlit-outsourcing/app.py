@@ -41,6 +41,16 @@ REQUIRED_COLUMNS = [
     "saved_at",
     "drive_url",
 ]
+PREFERRED_VOICE_OPTIONS = {
+    "US": [
+        ("Matilda", "여자(US): Matilda - Agent, Professional, Audiobook"),
+        ("Will", "남자(US): Will - Relaxed Optimist"),
+    ],
+    "UK": [
+        ("Casey", "여자(UK): Casey - Clean, Crisp and Friendly"),
+        ("George", "남자(UK): George - Warm, Captivating Storyteller"),
+    ],
+}
 
 
 def secret_value(name: str, default: str = ""):
@@ -146,6 +156,16 @@ def voice_label(voice: dict) -> str:
     if age:
         parts.append(f"· {age}")
     return " ".join(parts)
+
+
+def preferred_voice_options(voices: list[dict], accent: str) -> dict[str, dict]:
+    options = {}
+    by_name = {clean_text(voice.get("name")).lower(): voice for voice in voices}
+    for voice_name, label in PREFERRED_VOICE_OPTIONS[accent]:
+        voice = by_name.get(voice_name.lower())
+        if voice:
+            options[label] = voice
+    return options
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
@@ -264,10 +284,21 @@ def render_voice_selector() -> None:
     if not voices:
         st.warning("불러온 보이스가 없습니다.")
         return
-    american = [v for v in voices if "american" in str(v.get("accent") or "").lower()] or voices
-    british = [v for v in voices if "british" in str(v.get("accent") or "").lower()] or voices
-    us_options = {voice_label(v): v for v in american}
-    uk_options = {voice_label(v): v for v in british}
+    us_options = preferred_voice_options(voices, "US")
+    uk_options = preferred_voice_options(voices, "UK")
+    if not us_options or not uk_options:
+        missing = []
+        if not us_options:
+            missing.append("US: Matilda, Will")
+        if not uk_options:
+            missing.append("UK: Casey, George")
+        st.error("지정 성우를 ElevenLabs 계정에서 찾지 못했습니다: " + " / ".join(missing))
+        return
+    allowed_voice_ids = {voice["voice_id"] for voice in [*us_options.values(), *uk_options.values()]}
+    config = current_voice_config()
+    if config and (config.get("voice_us") not in allowed_voice_ids or config.get("voice_uk") not in allowed_voice_ids):
+        st.session_state.pop("voice_config", None)
+        config = None
     col1, col2 = st.columns(2)
     us_label = col1.selectbox("American Voice", list(us_options))
     uk_label = col2.selectbox("British Voice", list(uk_options))
