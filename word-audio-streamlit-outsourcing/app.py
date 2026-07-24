@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import io
 import hashlib
@@ -1308,8 +1308,13 @@ def save_page_to_google(page_df: pd.DataFrame) -> tuple[int, int]:
     return saved, skipped
 
 
-def submit_page_zip_status(page_df: pd.DataFrame) -> tuple[int, int]:
-    return apply_page_zip_status(page_df, DRIVE_ZIP_DOWNLOAD_LABEL, require_session_audio=True)
+def submit_page_zip_status(page_df: pd.DataFrame, zip_bytes: bytes | None = None) -> tuple[int, int]:
+    return apply_page_zip_status(
+        page_df,
+        DRIVE_ZIP_DOWNLOAD_LABEL,
+        zip_bytes=zip_bytes,
+        require_session_audio=zip_bytes is None,
+    )
 
 
 def submit_page_zip_to_drive(page_df: pd.DataFrame, page: int) -> tuple[int, int, str]:
@@ -1320,7 +1325,7 @@ def submit_page_zip_to_drive(page_df: pd.DataFrame, page: int) -> tuple[int, int
     file_name = page_zip_file_name(page_df, page, for_drive=True)
     drive_url = upload_file_via_apps_script(file_name, zip_bytes, "application/zip")
     try:
-        saved, skipped = apply_page_zip_status(page_df, drive_url, zip_bytes=zip_bytes, require_session_audio=True)
+        saved, skipped = apply_page_zip_status(page_df, drive_url, zip_bytes=zip_bytes, require_session_audio=False)
     except Exception as exc:
         st.session_state["last_uploaded_zip_url"] = drive_url
         st.session_state["last_uploaded_zip_page"] = int(page)
@@ -1328,9 +1333,9 @@ def submit_page_zip_to_drive(page_df: pd.DataFrame, page: int) -> tuple[int, int
     return saved, skipped, drive_url
 
 
-def handle_zip_status_submit(page_df: pd.DataFrame) -> None:
+def handle_zip_status_submit(page_df: pd.DataFrame, zip_bytes: bytes | None = None) -> None:
     try:
-        saved, skipped = submit_page_zip_status(page_df)
+        saved, skipped = submit_page_zip_status(page_df, zip_bytes=zip_bytes)
         st.session_state["zip_submit_message"] = f"ZIP 기준 시트 반영 완료: 저장완료 {saved}개 / 이상·미생성 {skipped}개"
         st.session_state.pop("zip_submit_error", None)
     except Exception as exc:
@@ -1605,14 +1610,15 @@ def main() -> None:
     with action_cols[3]:
         zip_ready = savable_audio_count > 0 and ready_audio_count >= savable_audio_count
         if zip_ready:
+            zip_bytes = build_page_zip(page_df)
             st.download_button(
                 "\uB85C\uCEEC ZIP \uC800\uC7A5",
-                build_page_zip(page_df),
+                zip_bytes,
                 file_name=page_zip_file_name(page_df, int(page)),
                 mime="application/zip",
                 use_container_width=True,
                 on_click=handle_zip_status_submit,
-                args=(page_df.copy(),),
+                args=(page_df.copy(), zip_bytes),
             )
         else:
             st.button(
@@ -1695,3 +1701,5 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+
