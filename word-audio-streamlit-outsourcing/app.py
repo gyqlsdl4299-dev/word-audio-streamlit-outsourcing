@@ -687,7 +687,6 @@ def render_inline_play_button(audio_bytes: bytes, button_id: str) -> None:
         </script>
         """,
         height=42,
-        key=f"inline_audio_{safe_id}",
     )
 
 
