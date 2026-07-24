@@ -210,9 +210,38 @@ def preferred_voice_options(voices: list[dict], accent: str) -> dict[str, dict]:
             options[label] = voice
     return options
 
-def all_voice_options(voices: list[dict]) -> dict[str, dict]:
+def voice_gender_group(voice: dict) -> str:
+    raw_gender = clean_text(voice.get("gender")).lower()
+    if "female" in raw_gender or "woman" in raw_gender:
+        return "female"
+    if "male" in raw_gender or "man" in raw_gender:
+        return "male"
+    return ""
+
+
+def voice_matches_accent(voice: dict, target_accent: str) -> bool:
+    accent_text = clean_text(voice.get("accent")).lower()
+    name_text = clean_text(voice.get("name")).lower()
+    haystack = f"{accent_text} {name_text}"
+    if target_accent == "US":
+        return any(token in haystack for token in ["american", "united states", "usa", "us ", " u.s", " u.s."])
+    if target_accent == "UK":
+        return any(token in haystack for token in ["british", "england", "english", "uk ", " u.k", " u.k."])
+    return True
+
+
+def voice_sort_key(voice: dict) -> tuple[str, str, str]:
+    gender_order = {"female": "0", "male": "1"}.get(voice_gender_group(voice), "9")
+    return (gender_order, clean_text(voice.get("accent")).lower(), clean_text(voice.get("name")).lower())
+
+
+def accent_voice_options(voices: list[dict], target_accent: str) -> dict[str, dict]:
     options = {}
-    for voice in voices:
+    filtered = [
+        voice for voice in voices
+        if voice_gender_group(voice) and voice_matches_accent(voice, target_accent)
+    ]
+    for voice in sorted(filtered, key=voice_sort_key):
         label = voice_label(voice)
         if label in options:
             label = f"{label} - {clean_text(voice.get('voice_id'))[:8]}"
@@ -357,36 +386,43 @@ def render_voice_selector() -> None:
     if not voices:
         st.warning("불러온 보이스가 없습니다.")
         return
-    all_options = all_voice_options(voices)
-    if not all_options:
-        st.warning("No selectable voices were found in your ElevenLabs account.")
+    us_options = accent_voice_options(voices, "US")
+    uk_options = accent_voice_options(voices, "UK")
+    if not us_options or not uk_options:
+        missing = []
+        if not us_options:
+            missing.append("American Voice")
+        if not uk_options:
+            missing.append("British Voice")
+        st.warning("No gender-labeled accent-matching voices found for: " + " / ".join(missing))
+        st.caption("Voices without gender labels are hidden. Check ElevenLabs voice labels if a voice is missing.")
         return
     config = current_voice_config()
     col1, col2 = st.columns(2)
     us_label = col1.selectbox(
         "American Voice",
-        list(all_options),
-        index=option_index_by_voice_id(all_options, config.get("voice_us", "") if config else ""),
-        help="All voices from your ElevenLabs account are shown here.",
+        list(us_options),
+        index=option_index_by_voice_id(us_options, config.get("voice_us", "") if config else ""),
+        help="Only gender-labeled American voices are shown.",
     )
     uk_label = col2.selectbox(
         "British Voice",
-        list(all_options),
-        index=option_index_by_voice_id(all_options, config.get("voice_uk", "") if config else ""),
-        help="All voices from your ElevenLabs account are shown here.",
+        list(uk_options),
+        index=option_index_by_voice_id(uk_options, config.get("voice_uk", "") if config else ""),
+        help="Only gender-labeled British voices are shown.",
     )
     sample = st.text_input("미리듣기 단어", value="adder")
     p1, p2, p3 = st.columns([1, 1, 1])
     if p1.button("US 미리듣기"):
-        st.audio(tts_request(api_key, all_options[us_label]["voice_id"], dictionary_tts_text(sample), model_id), format="audio/mp3")
+        st.audio(tts_request(api_key, us_options[us_label]["voice_id"], dictionary_tts_text(sample), model_id), format="audio/mp3")
     if p2.button("UK 미리듣기"):
-        st.audio(tts_request(api_key, all_options[uk_label]["voice_id"], dictionary_tts_text(sample), model_id), format="audio/mp3")
+        st.audio(tts_request(api_key, uk_options[uk_label]["voice_id"], dictionary_tts_text(sample), model_id), format="audio/mp3")
     if p3.button("이 성우로 적용", type="primary"):
         st.session_state["voice_config"] = {
             "api_key": api_key,
             "model_id": model_id,
-            "voice_us": all_options[us_label]["voice_id"],
-            "voice_uk": all_options[uk_label]["voice_id"],
+            "voice_us": us_options[us_label]["voice_id"],
+            "voice_uk": uk_options[uk_label]["voice_id"],
             "voice_us_label": us_label,
             "voice_uk_label": uk_label,
         }
