@@ -59,6 +59,8 @@ DRIVE_ZIP_RECOVERED_LABEL = "Drive ZIP 복구"
 
 
 DEFAULT_GOOGLE_DRIVE_FOLDER_ID = "1rrpaErhjoSICF5NvhfHCArYUHmpF5QBW"
+DEFAULT_GOOGLE_SHEET_ID = "1_qfcXEBw7ALtiZUXysd8O4YrNQk8nsGbQJJnrVUqKgg"
+DEFAULT_GOOGLE_WORKSHEET_NAME = "all_issues"
 PREFERRED_VOICE_OPTIONS = {
     "US": [
         ("Matilda", "여자(US): Matilda - Agent, Professional, Audiobook"),
@@ -755,14 +757,8 @@ def ensure_sheet_columns(service, spreadsheet_id: str, sheet_name: str, required
 
 
 def google_sheet_target(row: pd.Series) -> tuple[str, str]:
-    worker_id = clean_text(row.get("worker_id"))
-    spreadsheet_id = ""
-    sheet_name = ""
-    if worker_id:
-        spreadsheet_id = secret_text(f"GOOGLE_SHEET_ID_WORKER_{worker_id}")
-        sheet_name = secret_text(f"GOOGLE_WORKSHEET_NAME_WORKER_{worker_id}")
-    spreadsheet_id = spreadsheet_id or secret_text("GOOGLE_SHEET_ID")
-    sheet_name = sheet_name or secret_text("GOOGLE_WORKSHEET_NAME", "Sheet1")
+    spreadsheet_id = secret_text("GOOGLE_REEXTRACT_SHEET_ID", DEFAULT_GOOGLE_SHEET_ID)
+    sheet_name = secret_text("GOOGLE_REEXTRACT_WORKSHEET_NAME", DEFAULT_GOOGLE_WORKSHEET_NAME)
     return spreadsheet_id, sheet_name
 
 
@@ -998,6 +994,11 @@ def sync_status_from_google(df: pd.DataFrame) -> tuple[pd.DataFrame, int]:
             changed = False
             for column in sync_columns:
                 value = clean_text(record.get(column))
+                if not value:
+                    for candidate in sheet_update_key_candidates(column):
+                        value = clean_text(record.get(candidate))
+                        if value:
+                            break
                 if value:
                     next_df.at[index, column] = value
                     changed = True
@@ -1016,12 +1017,25 @@ def first_incomplete_page(df: pd.DataFrame) -> int:
     return int(pages[-1]) if pages else 1
 
 
+
+def sheet_update_key_candidates(key: str) -> list[str]:
+    aliases = {
+        "status": ["reextract_status", "status"],
+        "issue_note": ["reextract_note", "issue_note", "note"],
+        "file_name": ["reextract_file_name", "file_name"],
+    }
+    return aliases.get(key, [key])
+
+
+def sheet_update_columns(headers: list[str], key: str) -> list[int]:
+    return [headers.index(candidate) for candidate in sheet_update_key_candidates(key) if candidate in headers]
+
 def update_google_sheet(row: pd.Series, updates: dict) -> None:
     spreadsheet_id, sheet_name = google_sheet_target(row)
     if not spreadsheet_id:
         return
     _, sheets = google_clients()
-    headers = ensure_sheet_columns(sheets, spreadsheet_id, sheet_name, ["status", "issue_note", "saved_at", "drive_url"])
+    headers = ensure_sheet_columns(sheets, spreadsheet_id, sheet_name, ["reextract_status", "reextract_note", "saved_at", "drive_url"])
     values = sheets.spreadsheets().values().get(spreadsheetId=spreadsheet_id, range=f"{sheet_name}!A1:{col_letter(len(headers) - 1)}").execute().get("values", [])
     audio_col = headers.index("audio_id") if "audio_id" in headers else -1
     file_col = headers.index("file_name") if "file_name" in headers else -1
@@ -1035,15 +1049,13 @@ def update_google_sheet(row: pd.Series, updates: dict) -> None:
     if target_row is None:
         return
     for key, value in updates.items():
-        if key not in headers:
-            continue
-        col = headers.index(key)
-        sheets.spreadsheets().values().update(
-            spreadsheetId=spreadsheet_id,
-            range=f"{sheet_name}!{col_letter(col)}{target_row}",
-            valueInputOption="RAW",
-            body={"values": [[sheet_value(value)]]},
-        ).execute()
+        for col in sheet_update_columns(headers, key):
+            sheets.spreadsheets().values().update(
+                spreadsheetId=spreadsheet_id,
+                range=f"{sheet_name}!{col_letter(col)}{target_row}",
+                valueInputOption="RAW",
+                body={"values": [[sheet_value(value)]]},
+            ).execute()
 
 
 def append_issue_sheet(row: pd.Series, note: str) -> None:
@@ -1066,7 +1078,7 @@ def batch_update_google_sheet(row_updates: list[tuple[pd.Series, dict]]) -> None
     if not row_updates:
         return
     grouped: dict[tuple[str, str], list[tuple[pd.Series, dict]]] = {}
-    required_columns = {"status", "issue_note", "saved_at", "drive_url"}
+    required_columns = {"reextract_status", "reextract_note", "saved_at", "drive_url"}
     for row, updates in row_updates:
         spreadsheet_id, sheet_name = google_sheet_target(row)
         if not spreadsheet_id:
@@ -1097,13 +1109,11 @@ def batch_update_google_sheet(row_updates: list[tuple[pd.Series, dict]]) -> None
             if not target_row:
                 continue
             for key, value in updates.items():
-                if key not in headers:
-                    continue
-                col = headers.index(key)
-                data.append({
-                    "range": f"{sheet_name}!{col_letter(col)}{target_row}",
-                    "values": [[sheet_value(value)]],
-                })
+                for col in sheet_update_columns(headers, key):
+                    data.append({
+                        "range": f"{sheet_name}!{col_letter(col)}{target_row}",
+                        "values": [[sheet_value(value)]],
+                    })
         if data:
             sheets.spreadsheets().values().batchUpdate(
                 spreadsheetId=spreadsheet_id,
