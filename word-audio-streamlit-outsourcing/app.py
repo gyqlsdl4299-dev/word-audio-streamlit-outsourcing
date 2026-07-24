@@ -210,6 +210,24 @@ def preferred_voice_options(voices: list[dict], accent: str) -> dict[str, dict]:
             options[label] = voice
     return options
 
+def all_voice_options(voices: list[dict]) -> dict[str, dict]:
+    options = {}
+    for voice in voices:
+        label = voice_label(voice)
+        if label in options:
+            label = f"{label} - {clean_text(voice.get('voice_id'))[:8]}"
+        options[label] = voice
+    return options
+
+
+def option_index_by_voice_id(options: dict[str, dict], voice_id: str) -> int:
+    labels = list(options)
+    for idx, label in enumerate(labels):
+        if clean_text(options[label].get("voice_id")) == clean_text(voice_id):
+            return idx
+    return 0
+
+
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def list_elevenlabs_voices(api_key: str) -> list[dict]:
@@ -339,36 +357,36 @@ def render_voice_selector() -> None:
     if not voices:
         st.warning("불러온 보이스가 없습니다.")
         return
-    us_options = preferred_voice_options(voices, "US")
-    uk_options = preferred_voice_options(voices, "UK")
-    if not us_options or not uk_options:
-        missing = []
-        if not us_options:
-            missing.append("US: Matilda, Will")
-        if not uk_options:
-            missing.append("UK: Casey, George")
-        st.error("지정 성우를 ElevenLabs 계정에서 찾지 못했습니다: " + " / ".join(missing))
+    all_options = all_voice_options(voices)
+    if not all_options:
+        st.warning("No selectable voices were found in your ElevenLabs account.")
         return
-    allowed_voice_ids = {voice["voice_id"] for voice in [*us_options.values(), *uk_options.values()]}
     config = current_voice_config()
-    if config and (config.get("voice_us") not in allowed_voice_ids or config.get("voice_uk") not in allowed_voice_ids):
-        st.session_state.pop("voice_config", None)
-        config = None
     col1, col2 = st.columns(2)
-    us_label = col1.selectbox("American Voice", list(us_options))
-    uk_label = col2.selectbox("British Voice", list(uk_options))
+    us_label = col1.selectbox(
+        "American Voice",
+        list(all_options),
+        index=option_index_by_voice_id(all_options, config.get("voice_us", "") if config else ""),
+        help="All voices from your ElevenLabs account are shown here.",
+    )
+    uk_label = col2.selectbox(
+        "British Voice",
+        list(all_options),
+        index=option_index_by_voice_id(all_options, config.get("voice_uk", "") if config else ""),
+        help="All voices from your ElevenLabs account are shown here.",
+    )
     sample = st.text_input("미리듣기 단어", value="adder")
     p1, p2, p3 = st.columns([1, 1, 1])
     if p1.button("US 미리듣기"):
-        st.audio(tts_request(api_key, us_options[us_label]["voice_id"], dictionary_tts_text(sample), model_id), format="audio/mp3")
+        st.audio(tts_request(api_key, all_options[us_label]["voice_id"], dictionary_tts_text(sample), model_id), format="audio/mp3")
     if p2.button("UK 미리듣기"):
-        st.audio(tts_request(api_key, uk_options[uk_label]["voice_id"], dictionary_tts_text(sample), model_id), format="audio/mp3")
+        st.audio(tts_request(api_key, all_options[uk_label]["voice_id"], dictionary_tts_text(sample), model_id), format="audio/mp3")
     if p3.button("이 성우로 적용", type="primary"):
         st.session_state["voice_config"] = {
             "api_key": api_key,
             "model_id": model_id,
-            "voice_us": us_options[us_label]["voice_id"],
-            "voice_uk": uk_options[uk_label]["voice_id"],
+            "voice_us": all_options[us_label]["voice_id"],
+            "voice_uk": all_options[uk_label]["voice_id"],
             "voice_us_label": us_label,
             "voice_uk_label": uk_label,
         }
