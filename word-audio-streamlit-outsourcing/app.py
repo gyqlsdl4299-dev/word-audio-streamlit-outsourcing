@@ -57,6 +57,8 @@ STATUS_ISSUE = "이상표시"
 DRIVE_ZIP_DOWNLOAD_LABEL = "ZIP 다운로드"
 DRIVE_ZIP_RECOVERED_LABEL = "Drive ZIP 복구"
 
+
+DEFAULT_GOOGLE_DRIVE_FOLDER_ID = "1rrpaErhjoSICF5NvhfHCArYUHmpF5QBW"
 PREFERRED_VOICE_OPTIONS = {
     "US": [
         ("Matilda", "여자(US): Matilda - Agent, Professional, Audiobook"),
