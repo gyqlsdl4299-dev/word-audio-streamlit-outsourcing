@@ -358,7 +358,7 @@ def normalize_upload(df: pd.DataFrame) -> pd.DataFrame:
         if not clean_text(row["pronunciation_key"]):
             df.at[index, "pronunciation_key"] = f"same|{clean_text(row['word']).lower()}"
         status = clean_text(row.get("status"))
-        if not status or status in {STATUS_ISSUE, "issue", "failed", STATUS_DONE}:
+        if not status or status in {"issue", "failed"}:
             df.at[index, "status"] = STATUS_PENDING
     return df[expected_columns]
 
@@ -366,6 +366,35 @@ def normalize_upload(df: pd.DataFrame) -> pd.DataFrame:
 def load_uploaded_excel(uploaded_file) -> pd.DataFrame:
     raw = pd.read_excel(uploaded_file, dtype=str)
     return normalize_upload(raw)
+
+
+def load_google_sheet_workbook() -> tuple[pd.DataFrame, int, int]:
+    spreadsheet_id, sheet_name = google_sheet_target(pd.Series(dtype=object))
+    if not spreadsheet_id or not sheet_name:
+        raise RuntimeError("Google Sheet target is not configured.")
+    _drive, sheets = google_clients()
+    result = sheets.spreadsheets().values().get(
+        spreadsheetId=spreadsheet_id,
+        range=f"{sheet_name}!A1:Z",
+    ).execute()
+    values = result.get("values", [])
+    if not values:
+        raise RuntimeError("Google Sheet is empty.")
+    headers = [clean_text(item).lstrip("\ufeff").lower() for item in values[0]]
+    rows = [row + [""] * (len(headers) - len(row)) for row in values[1:]]
+    raw = pd.DataFrame(rows, columns=headers)
+    df = normalize_upload(raw)
+    synced = 0
+    zip_synced = 0
+    try:
+        df, synced = sync_status_from_google(df)
+    except Exception:
+        synced = 0
+    try:
+        df, zip_synced = sync_status_from_drive_zips(df)
+    except Exception:
+        zip_synced = 0
+    return df, synced, zip_synced
 
 
 def get_df() -> pd.DataFrame | None:
@@ -502,7 +531,7 @@ def split_review_rows(page_df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame
     return page_df.loc[main_indexes].copy(), page_df.loc[reuse_indexes].copy()
 
 
-def update_rows(indexes: list[int], **updates) -> None:
+def update_rows(indexes: list[int], persist: bool = False, **updates) -> None:
     df = get_df()
     if df is None:
         return
@@ -511,6 +540,9 @@ def update_rows(indexes: list[int], **updates) -> None:
             if key in df.columns:
                 df.at[index, key] = str(value)
     set_df(df)
+    if persist:
+        changed = [(df.loc[index].copy(), updates) for index in indexes if index in df.index]
+        batch_update_google_sheet(changed)
 
 
 def row_tts_text(row: pd.Series) -> str:
@@ -535,22 +567,23 @@ def row_issue_reference(row: pd.Series) -> str:
 def generate_page(page_df: pd.DataFrame, force: bool = False) -> tuple[int, int]:
     config = current_voice_config()
     if not config:
-        raise RuntimeError("먼저 성우를 선택하고 '이 성우로 적용'을 눌러 주세요.")
+        raise RuntimeError("?? ??? ???? ??? ???.")
     audios = get_audios()
     page_cache: dict[tuple[str, str], bytes] = {}
     targets = page_df.index.tolist()
     progress = st.progress(0)
-    status = st.empty()
+    status_box = st.empty()
     ok = 0
     failed = 0
+    sheet_updates = []
     for offset, index in enumerate(targets, start=1):
         df = get_df()
         row = df.loc[index]
         key = row_key(row)
-        if not force and key in audios and clean_text(row["status"]) in {"검수중", "저장완료"}:
+        if not force and key in audios and clean_text(row["status"]) in {STATUS_REVIEWING, STATUS_DONE}:
             continue
         cache_key = (row["accent"], row["pronunciation_key"])
-        status.write(f"{offset}/{len(targets)} 생성 중: {row['word']} {row['accent']}")
+        status_box.write(f"{offset}/{len(targets)} ?? ?: {row['word']} {row['accent']}")
         try:
             if cache_key in page_cache:
                 audio = page_cache[cache_key]
@@ -565,14 +598,20 @@ def generate_page(page_df: pd.DataFrame, force: bool = False) -> tuple[int, int]
                 )
                 page_cache[cache_key] = audio
             audios[key] = audio
-            update_rows([index], status="검수중", source_note=f"generated {time.strftime('%Y-%m-%d %H:%M:%S')}")
+            generated_note = f"generated {time.strftime('%Y-%m-%d %H:%M:%S')}"
+            update_rows([index], status=STATUS_REVIEWING, source_note=generated_note)
+            sheet_updates.append((row.copy(), {"status": STATUS_REVIEWING, "source_note": generated_note}))
             ok += 1
         except Exception as exc:
-            update_rows([index], status="failed", source_note=str(exc)[:500])
+            fail_note = str(exc)[:500]
+            update_rows([index], status="failed", source_note=fail_note)
+            sheet_updates.append((row.copy(), {"status": "failed", "source_note": fail_note}))
             failed += 1
         progress.progress(offset / len(targets))
         time.sleep(0.05)
-    status.write(f"생성 완료: 성공 {ok}개 / 실패 {failed}개")
+    if sheet_updates:
+        batch_update_google_sheet(sheet_updates)
+    status_box.write(f"\uc0dd\uc131 \uc644\ub8cc: \uc131\uacf5 {ok}\uac1c / \uc2e4\ud328 {failed}\uac1c")
     return ok, failed
 
 
@@ -604,7 +643,7 @@ def regenerate_row(index: int, page_df: pd.DataFrame) -> None:
     note = f"regenerated {time.strftime('%Y-%m-%d %H:%M:%S')} / {new_hash[:8]}"
     if old_hash and new_hash == old_hash:
         note += " / provider returned same audio"
-    update_rows(matched, status="검수중", source_note=note)
+    update_rows(matched, persist=True, status=STATUS_REVIEWING, source_note=note)
 
 
 def build_page_zip(page_df: pd.DataFrame) -> bytes:
@@ -1435,14 +1474,14 @@ def render_rows(page_df: pd.DataFrame) -> None:
                     st.caption("미생성")
 
             with cols[7]:
-                is_issue = status == "이상표시"
-                issue_label = "이상 해제" if is_issue else "이상 표시"
+                is_issue = status == STATUS_ISSUE
+                issue_label = "\uc774\uc0c1 \ud574\uc81c" if is_issue else "\uc774\uc0c1 \ud45c\uc2dc"
                 if st.button(issue_label, key=f"issue_{index}", use_container_width=True):
                     if is_issue:
-                        update_rows([index], status="검수중", issue_note="")
+                        update_rows([index], persist=True, status=STATUS_REVIEWING, issue_note="")
                     else:
-                        note = f"발음 이상 표시 {time.strftime('%Y-%m-%d %H:%M:%S')}"
-                        update_rows([index], status="이상표시", issue_note=note)
+                        note = f"\ubc1c\uc74c \uc774\uc0c1 \ud45c\uc2dc {time.strftime('%Y-%m-%d %H:%M:%S')}"
+                        update_rows([index], persist=True, status=STATUS_ISSUE, issue_note=note)
                     st.rerun()
 
             with cols[8]:
@@ -1466,6 +1505,18 @@ def main() -> None:
     st.set_page_config(page_title="\uC774\uC0C1\uC74C\uC6D0 \uC7AC\uCD94\uCD9C", layout="wide")
     st.title("\uC774\uC0C1\uC74C\uC6D0 \uC7AC\uCD94\uCD9C")
 
+    if get_df() is None and not st.session_state.get("google_autoload_tried") and (secret_text("GOOGLE_SERVICE_ACCOUNT_JSON_B64") or secret_value("GOOGLE_SERVICE_ACCOUNT_JSON", "")):
+        st.session_state["google_autoload_tried"] = True
+        try:
+            df, synced, zip_synced = load_google_sheet_workbook()
+            set_df(df)
+            st.session_state["current_page"] = first_incomplete_page(df)
+            st.session_state["audios"] = {}
+            st.toast(f"Google Sheet \uae30\ub85d \ubcf5\uc6d0 \uc644\ub8cc: {len(df):,}\uac1c \ud589")
+            st.rerun()
+        except Exception as exc:
+            st.warning(f"Google Sheet \uae30\ub85d \uc790\ub3d9 \ubcf5\uc6d0\uc744 \ud558\uc9c0 \ubabb\ud588\uc2b5\ub2c8\ub2e4: {exc}")
+
     with st.expander("1. 엑셀 업로드", expanded=get_df() is None):
         uploaded = st.file_uploader("\uC774\uC0C1\uC74C\uC6D0 \uC7AC\uCD94\uCD9C \uB9AC\uC2A4\uD2B8\uB97C \uC5C5\uB85C\uB4DC\uD574 \uC8FC\uC138\uC694.", type=["xlsx", "xls"])
         if uploaded and st.button("엑셀 불러오기", type="primary"):
@@ -1487,6 +1538,16 @@ def main() -> None:
             st.success(f"{uploaded.name}에서 {len(df):,}개 음원 행을 불러왔습니다. Sheet 기록 {synced:,}개, Drive ZIP 기록 {zip_synced:,}개를 반영했습니다.")
             st.rerun()
         st.caption("\uC791\uC5C5\uC790 \uAC80\uC218 \uBA54\uBAA8\uAC00 \uD3EC\uD568\uB41C \uC7AC\uCD94\uCD9C \uB9AC\uC2A4\uD2B8\uB97C \uC62C\uB9AC\uBA74 \uBC1C\uC74C \uAD00\uB828 \uCC38\uACE0\uC0AC\uD56D\uC744 \uC0DD\uC131 \uC2A4\uD06C\uB9BD\uD2B8\uC5D0 \uC790\uB3D9 \uBC18\uC601\uD569\uB2C8\uB2E4.")
+        if st.button("Google Sheet \uae30\ub85d \ubd88\ub7ec\uc624\uae30", use_container_width=True):
+            try:
+                df, synced, zip_synced = load_google_sheet_workbook()
+                set_df(df)
+                st.session_state["current_page"] = first_incomplete_page(df)
+                st.session_state["audios"] = {}
+                st.success(f"Google Sheet\uc5d0\uc11c {len(df):,}\uac1c \ud589\uc744 \ubd88\ub7ec\uc654\uc2b5\ub2c8\ub2e4. Sheet \uae30\ub85d {synced:,}\uac1c, Drive ZIP \uae30\ub85d {zip_synced:,}\uac1c\ub97c \ubc18\uc601\ud588\uc2b5\ub2c8\ub2e4.")
+                st.rerun()
+            except Exception as exc:
+                st.error(f"Google Sheet \uae30\ub85d\uc744 \ubd88\ub7ec\uc624\uc9c0 \ubabb\ud588\uc2b5\ub2c8\ub2e4: {exc}")
 
     with st.expander("2. 성우 선택 / 미리듣기", expanded=current_voice_config() is None):
         render_voice_selector()
