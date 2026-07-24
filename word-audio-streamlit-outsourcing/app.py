@@ -94,7 +94,8 @@ def gemini_key() -> str:
 
 
 def google_drive_folder_id() -> str:
-    return secret_text("GOOGLE_DRIVE_FOLDER_ID", DEFAULT_GOOGLE_DRIVE_FOLDER_ID) or DEFAULT_GOOGLE_DRIVE_FOLDER_ID
+    # Keep re-extracted issue-audio ZIPs isolated from the outsourcing review folder.
+    return DEFAULT_GOOGLE_DRIVE_FOLDER_ID
 
 
 def clean_text(value) -> str:
