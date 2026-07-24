@@ -41,6 +41,22 @@ REQUIRED_COLUMNS = [
     "saved_at",
     "drive_url",
 ]
+REEXTRACT_OPTIONAL_COLUMNS = [
+    "source_worker_id",
+    "created_at",
+    "note",
+    "reextract_status",
+    "reextract_file_name",
+    "reextract_note",
+    "worker_check_reference_note",
+]
+STATUS_PENDING = "pending"
+STATUS_REVIEWING = "검수중"
+STATUS_DONE = "저장완료"
+STATUS_ISSUE = "이상표시"
+DRIVE_ZIP_DOWNLOAD_LABEL = "ZIP 다운로드"
+DRIVE_ZIP_RECOVERED_LABEL = "Drive ZIP 복구"
+
 PREFERRED_VOICE_OPTIONS = {
     "US": [
         ("Matilda", "여자(US): Matilda - Agent, Professional, Audiobook"),
@@ -118,10 +134,34 @@ def audio_file_name(word: str, sense_code: str, accent: str, seq: int) -> str:
     return f"{slug(word)}_{sense}_{clean_text(accent).upper()}.mp3"
 
 
-def dictionary_tts_text(word: str, pos: str = "") -> str:
+def dictionary_tts_text(word: str, pos: str = "", accent: str = "", issue_note: str = "", check_note: str = "") -> str:
     raw = clean_text(word).rstrip(".!?")
     lower = raw.lower()
     pos_lower = clean_text(pos).lower()
+    accent = clean_text(accent).upper()
+    notes = f"{clean_text(issue_note)} {clean_text(check_note)}".lower()
+    if " modal" in lower:
+        raw = re.sub(r"\s+modal$", "", raw, flags=re.IGNORECASE)
+        lower = raw.lower()
+    if "\uD558\uC774\uD508" in notes or "hyphen" in notes:
+        hyphen_overrides = {
+            "non": "non-",
+            "nonstop": "non-stop",
+            "northeast": "north-east",
+            "northwest": "north-west",
+        }
+        raw = hyphen_overrides.get(lower, raw)
+        lower = raw.lower()
+    if "\uB300\uBB38\uC790" in notes or "proper" in notes:
+        raw = raw[:1].upper() + raw[1:]
+    if accent == "UK":
+        uk_j_overrides = {
+            "news": "nyoos",
+            "nuclear": "nyoo-clear",
+            "numeral": "nyoo-mer-al",
+        }
+        if lower in uk_j_overrides and ("/j/" in notes or "nju" in notes or "\uB274" in notes):
+            raw = uk_j_overrides[lower]
     if lower == "i":
         return "eye."
     if lower == "a":
@@ -227,11 +267,22 @@ def tts_request(api_key: str, voice_id: str, text: str, model_id: str, variation
 def normalize_upload(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     df.columns = [clean_text(col).lstrip("\ufeff").lower() for col in df.columns]
-    for column in REQUIRED_COLUMNS:
+    if "source_worker_id" in df.columns and "worker_id" not in df.columns:
+        df["worker_id"] = df["source_worker_id"]
+    if "note" in df.columns and "issue_note" not in df.columns:
+        df["issue_note"] = df["note"]
+    if "reextract_status" in df.columns and "status" not in df.columns:
+        df["status"] = df["reextract_status"]
+    if "reextract_file_name" in df.columns and "file_name" not in df.columns:
+        df["file_name"] = df["reextract_file_name"]
+    expected_columns = REQUIRED_COLUMNS + [column for column in REEXTRACT_OPTIONAL_COLUMNS if column not in REQUIRED_COLUMNS]
+    for column in expected_columns:
         if column not in df.columns:
             df[column] = ""
     for column in df.columns:
         df[column] = df[column].fillna("").astype(str).map(clean_text)
+    if not df["worker_id"].str.strip().any() and "source_worker_id" in df.columns:
+        df["worker_id"] = df["source_worker_id"]
     df["accent"] = df["accent"].str.upper()
     df["worker_page"] = pd.to_numeric(df["worker_page"], errors="coerce").fillna(1).astype(int)
     df["page_row"] = pd.to_numeric(df["page_row"], errors="coerce").fillna(0).astype(int)
@@ -244,9 +295,10 @@ def normalize_upload(df: pd.DataFrame) -> pd.DataFrame:
             df.at[index, "file_name"] = audio_file_name(row["word"], df.at[index, "sense_code"], row["accent"], index + 1)
         if not clean_text(row["pronunciation_key"]):
             df.at[index, "pronunciation_key"] = f"same|{clean_text(row['word']).lower()}"
-        if not clean_text(row["status"]):
-            df.at[index, "status"] = "pending"
-    return df[REQUIRED_COLUMNS]
+        status = clean_text(row.get("status"))
+        if not status or status in {STATUS_ISSUE, "issue", "failed", STATUS_DONE}:
+            df.at[index, "status"] = STATUS_PENDING
+    return df[expected_columns]
 
 
 def load_uploaded_excel(uploaded_file) -> pd.DataFrame:
@@ -392,6 +444,25 @@ def update_rows(indexes: list[int], **updates) -> None:
     set_df(df)
 
 
+def row_tts_text(row: pd.Series) -> str:
+    return dictionary_tts_text(
+        row.get("word"),
+        row.get("pos"),
+        row.get("accent"),
+        row.get("issue_note") or row.get("note"),
+        row.get("worker_check_reference_note") or row.get("reextract_note"),
+    )
+
+
+def row_issue_reference(row: pd.Series) -> str:
+    parts = []
+    for column in ["issue_note", "note", "worker_check_reference_note", "reextract_note"]:
+        value = clean_text(row.get(column))
+        if value and value not in parts:
+            parts.append(value)
+    return " | ".join(parts)
+
+
 def generate_page(page_df: pd.DataFrame, force: bool = False) -> tuple[int, int]:
     config = current_voice_config()
     if not config:
@@ -419,7 +490,7 @@ def generate_page(page_df: pd.DataFrame, force: bool = False) -> tuple[int, int]
                 audio = tts_request(
                     config["api_key"],
                     voice_id,
-                    dictionary_tts_text(row["word"], row["pos"]),
+                    row_tts_text(row),
                     config["model_id"],
                     variation=(offset if force else 0),
                 )
@@ -451,7 +522,7 @@ def regenerate_row(index: int, page_df: pd.DataFrame) -> None:
     old_hash = hashlib.sha1(old_audio).hexdigest() if old_audio else ""
     audio = b""
     new_hash = ""
-    tts_text = dictionary_tts_text(row["word"], row["pos"])
+    tts_text = row_tts_text(row)
     for attempt in range(2):
         variation = int(index) + int(time.time()) + (regen_counts[key_for_count] * 1009) + (attempt * 17011)
         audio = tts_request(config["api_key"], voice_id, tts_text, config["model_id"], variation=variation)
@@ -647,6 +718,181 @@ def ensure_sheet_exists(service, spreadsheet_id: str, sheet_name: str, headers: 
                 body={"values": [headers]},
             ).execute()
 
+
+
+def drive_zip_name_parts(file_name: str) -> tuple[str, int] | None:
+    match = re.fullmatch(r"worker_([^/\\]+)_page_(\d{3})_audio\.zip", clean_text(file_name))
+    if not match:
+        return None
+    return match.group(1), int(match.group(2))
+
+
+def list_drive_zip_files() -> dict[tuple[str, int], dict]:
+    if not google_enabled():
+        return {}
+    folder_id = secret_text("GOOGLE_DRIVE_FOLDER_ID")
+    if not folder_id:
+        return {}
+    drive, _sheets = google_clients()
+    query = f"'{folder_id}' in parents and mimeType='application/zip' and trashed=false"
+    files_by_page: dict[tuple[str, int], dict] = {}
+    page_token = None
+    while True:
+        result = drive.files().list(
+            q=query,
+            pageToken=page_token,
+            pageSize=1000,
+            fields="nextPageToken,files(id,name,webViewLink,createdTime,modifiedTime,size)",
+            supportsAllDrives=True,
+            includeItemsFromAllDrives=True,
+            orderBy="createdTime desc",
+        ).execute()
+        for item in result.get("files", []):
+            parts = drive_zip_name_parts(item.get("name", ""))
+            if parts and parts not in files_by_page:
+                files_by_page[parts] = item
+        page_token = result.get("nextPageToken")
+        if not page_token:
+            break
+    return files_by_page
+
+
+def download_drive_file(file_id: str) -> bytes:
+    from googleapiclient.http import MediaIoBaseDownload
+
+    drive, _sheets = google_clients()
+    request = drive.files().get_media(fileId=file_id, supportsAllDrives=True)
+    buffer = io.BytesIO()
+    downloader = MediaIoBaseDownload(buffer, request)
+    done = False
+    while not done:
+        _status, done = downloader.next_chunk()
+    return buffer.getvalue()
+
+
+def zip_review_records(zip_bytes: bytes) -> tuple[set[str], dict[str, dict]]:
+    with zipfile.ZipFile(io.BytesIO(zip_bytes), "r") as zf:
+        audio_files = {name for name in zf.namelist() if name.lower().endswith(".mp3")}
+        records: dict[str, dict] = {}
+        if "page_log.csv" in zf.namelist():
+            with zf.open("page_log.csv") as handle:
+                log_df = pd.read_csv(handle, dtype=str).fillna("")
+            log_df.columns = [clean_text(col).lstrip("\ufeff").lower() for col in log_df.columns]
+            if "file_name" in log_df.columns:
+                for _idx, record in log_df.iterrows():
+                    file_name = clean_text(record.get("file_name"))
+                    if file_name:
+                        records[file_name] = {key: clean_text(value) for key, value in record.to_dict().items()}
+        return audio_files, records
+
+
+def apply_page_zip_status(
+    page_df: pd.DataFrame,
+    drive_url: str,
+    *,
+    zip_bytes: bytes | None = None,
+    require_session_audio: bool = True,
+    saved_at: str | None = None,
+) -> tuple[int, int]:
+    if require_session_audio:
+        validate_page_zip_ready(page_df)
+    audios = get_audios()
+    audio_files: set[str] = set()
+    zip_records: dict[str, dict] = {}
+    if zip_bytes:
+        audio_files, zip_records = zip_review_records(zip_bytes)
+    saved = 0
+    skipped = 0
+    now = saved_at or time.strftime("%Y-%m-%d %H:%M:%S")
+    sheet_updates = []
+    issue_rows = []
+    for index, row in page_df.iterrows():
+        file_name = clean_text(row.get("file_name"))
+        zip_record = zip_records.get(file_name, {})
+        row_status = clean_text(zip_record.get("status")) or clean_text(row.get("status"))
+        if row_status == STATUS_ISSUE:
+            note = clean_text(zip_record.get("issue_note")) or clean_text(row.get("issue_note")) or f"발음 이상 표시 {now}"
+            update_rows([index], status=STATUS_ISSUE, issue_note=note)
+            sheet_updates.append((row, {"status": STATUS_ISSUE, "issue_note": note}))
+            issue_rows.append((row, note))
+            skipped += 1
+            continue
+        has_audio = (row_key(row) in audios) if require_session_audio else (file_name in audio_files)
+        if not has_audio:
+            skipped += 1
+            continue
+        update_rows([index], status=STATUS_DONE, saved_at=now, drive_url=drive_url)
+        sheet_updates.append((row, {"status": STATUS_DONE, "saved_at": now, "drive_url": drive_url}))
+        saved += 1
+    batch_update_google_sheet(sheet_updates)
+    append_issue_sheets(issue_rows)
+    append_progress_sheet(page_df, saved, skipped)
+    return saved, skipped
+
+
+def sync_status_from_drive_zips(df: pd.DataFrame) -> tuple[pd.DataFrame, int]:
+    if df.empty or not google_enabled():
+        return df, 0
+    try:
+        zip_files = list_drive_zip_files()
+    except Exception:
+        return df, 0
+    if not zip_files:
+        return df, 0
+    next_df = df.copy()
+    synced = 0
+    done_statuses = {STATUS_DONE, STATUS_ISSUE}
+    for (worker_id, page), group in next_df.groupby(["worker_id", "worker_page"], dropna=False):
+        worker_key = re.sub(r"[^0-9A-Za-z_-]+", "_", clean_text(worker_id)).strip("_") or "unknown"
+        try:
+            page_key = int(page)
+        except (TypeError, ValueError):
+            continue
+        current_statuses = {clean_text(value) for value in group["status"].tolist()}
+        if current_statuses and current_statuses.issubset(done_statuses):
+            continue
+        zip_file = zip_files.get((worker_key, page_key))
+        if not zip_file:
+            continue
+        try:
+            audio_files, zip_records = zip_review_records(download_drive_file(zip_file["id"]))
+        except Exception:
+            continue
+        saved_at = clean_text(zip_file.get("createdTime")) or time.strftime("%Y-%m-%d %H:%M:%S")
+        drive_url = clean_text(zip_file.get("webViewLink")) or DRIVE_ZIP_RECOVERED_LABEL
+        for index, row in group.iterrows():
+            file_name = clean_text(row.get("file_name"))
+            record = zip_records.get(file_name, {})
+            record_status = clean_text(record.get("status"))
+            if record_status == STATUS_ISSUE:
+                next_df.at[index, "status"] = STATUS_ISSUE
+                if clean_text(record.get("issue_note")):
+                    next_df.at[index, "issue_note"] = clean_text(record.get("issue_note"))
+                synced += 1
+            elif file_name in audio_files:
+                next_df.at[index, "status"] = STATUS_DONE
+                next_df.at[index, "saved_at"] = saved_at
+                next_df.at[index, "drive_url"] = drive_url
+                synced += 1
+    return next_df, synced
+
+
+def recover_page_status_from_drive_zip(page_df: pd.DataFrame, page: int) -> tuple[int, int, str]:
+    file_name = page_zip_file_name(page_df, page, for_drive=True)
+    worker_id = "unknown"
+    if not page_df.empty:
+        worker_id = re.sub(r"[^0-9A-Za-z_-]+", "_", clean_text(page_df.iloc[0].get("worker_id"))).strip("_") or "unknown"
+    try:
+        zip_file = list_drive_zip_files().get((worker_id, int(page)))
+    except Exception as exc:
+        raise RuntimeError("Drive ZIP 목록을 읽지 못했습니다. 서비스 계정에 음원검수 폴더 접근 권한이 있는지 확인해 주세요.") from exc
+    if not zip_file:
+        raise RuntimeError(f"Drive에서 {file_name} 파일을 찾지 못했습니다.")
+    zip_bytes = download_drive_file(zip_file["id"])
+    drive_url = clean_text(zip_file.get("webViewLink")) or DRIVE_ZIP_RECOVERED_LABEL
+    saved_at = clean_text(zip_file.get("createdTime")) or None
+    saved, skipped = apply_page_zip_status(page_df, drive_url, zip_bytes=zip_bytes, require_session_audio=False, saved_at=saved_at)
+    return saved, skipped, drive_url
 
 def sync_status_from_google(df: pd.DataFrame) -> tuple[pd.DataFrame, int]:
     if df.empty:
@@ -946,32 +1192,7 @@ def save_page_to_google(page_df: pd.DataFrame) -> tuple[int, int]:
 
 
 def submit_page_zip_status(page_df: pd.DataFrame) -> tuple[int, int]:
-    validate_page_zip_ready(page_df)
-    audios = get_audios()
-    saved = 0
-    skipped = 0
-    now = time.strftime("%Y-%m-%d %H:%M:%S")
-    sheet_updates = []
-    issue_rows = []
-    for index, row in page_df.iterrows():
-        if clean_text(row.get("status")) == "이상표시":
-            note = clean_text(row.get("issue_note")) or f"발음 이상 표시 {now}"
-            update_rows([index], status="이상표시", issue_note=note)
-            sheet_updates.append((row, {"status": "이상표시", "issue_note": note}))
-            issue_rows.append((row, note))
-            skipped += 1
-            continue
-        key = row_key(row)
-        if key not in audios:
-            skipped += 1
-            continue
-        update_rows([index], status="저장완료", saved_at=now, drive_url="ZIP 다운로드")
-        sheet_updates.append((row, {"status": "저장완료", "saved_at": now, "drive_url": "ZIP 다운로드"}))
-        saved += 1
-    batch_update_google_sheet(sheet_updates)
-    append_issue_sheets(issue_rows)
-    append_progress_sheet(page_df, saved, skipped)
-    return saved, skipped
+    return apply_page_zip_status(page_df, DRIVE_ZIP_DOWNLOAD_LABEL, require_session_audio=True)
 
 
 def submit_page_zip_to_drive(page_df: pd.DataFrame, page: int) -> tuple[int, int, str]:
@@ -981,31 +1202,12 @@ def submit_page_zip_to_drive(page_df: pd.DataFrame, page: int) -> tuple[int, int
     zip_bytes = build_page_zip(page_df)
     file_name = page_zip_file_name(page_df, page, for_drive=True)
     drive_url = upload_file_via_apps_script(file_name, zip_bytes, "application/zip")
-
-    audios = get_audios()
-    saved = 0
-    skipped = 0
-    now = time.strftime("%Y-%m-%d %H:%M:%S")
-    sheet_updates = []
-    issue_rows = []
-    for index, row in page_df.iterrows():
-        if clean_text(row.get("status")) == "이상표시":
-            note = clean_text(row.get("issue_note")) or f"발음 이상 표시 {now}"
-            update_rows([index], status="이상표시", issue_note=note)
-            sheet_updates.append((row, {"status": "이상표시", "issue_note": note}))
-            issue_rows.append((row, note))
-            skipped += 1
-            continue
-        key = row_key(row)
-        if key not in audios:
-            skipped += 1
-            continue
-        update_rows([index], status="저장완료", saved_at=now, drive_url=drive_url)
-        sheet_updates.append((row, {"status": "저장완료", "saved_at": now, "drive_url": drive_url}))
-        saved += 1
-    batch_update_google_sheet(sheet_updates)
-    append_issue_sheets(issue_rows)
-    append_progress_sheet(page_df, saved, skipped)
+    try:
+        saved, skipped = apply_page_zip_status(page_df, drive_url, zip_bytes=zip_bytes, require_session_audio=True)
+    except Exception as exc:
+        st.session_state["last_uploaded_zip_url"] = drive_url
+        st.session_state["last_uploaded_zip_page"] = int(page)
+        raise RuntimeError(f"ZIP은 Drive에 저장됐지만 시트 상태 반영에 실패했습니다. 복구 버튼을 누르거나 다시 시도해 주세요. Drive URL: {drive_url} / 오류: {exc}") from exc
     return saved, skipped, drive_url
 
 
@@ -1174,27 +1376,39 @@ def render_rows(page_df: pd.DataFrame) -> None:
                     except Exception as exc:
                         st.error(str(exc))
 
+            reference_note = row_issue_reference(row)
+            if reference_note:
+                st.markdown(
+                    f'<div style="margin:8px 0 0 42px;padding:9px 12px;border-radius:8px;background:#f8fafc;border:1px solid #e2e8f0;color:#334155;font-size:12px;line-height:1.45;"><b>\uAC80\uC218 \uBA54\uBAA8</b> {html.escape(reference_note)}</div>',
+                    unsafe_allow_html=True,
+                )
+
 
 def main() -> None:
-    st.set_page_config(page_title="단어 음원 외주 검수", layout="wide")
-    st.title("단어 음원 외주 검수")
+    st.set_page_config(page_title="\uC774\uC0C1\uC74C\uC6D0 \uC7AC\uCD94\uCD9C", layout="wide")
+    st.title("\uC774\uC0C1\uC74C\uC6D0 \uC7AC\uCD94\uCD9C")
 
     with st.expander("1. 엑셀 업로드", expanded=get_df() is None):
-        uploaded = st.file_uploader("검수할 엑셀을 업로드해 주세요.", type=["xlsx", "xls"])
+        uploaded = st.file_uploader("\uC774\uC0C1\uC74C\uC6D0 \uC7AC\uCD94\uCD9C \uB9AC\uC2A4\uD2B8\uB97C \uC5C5\uB85C\uB4DC\uD574 \uC8FC\uC138\uC694.", type=["xlsx", "xls"])
         if uploaded and st.button("엑셀 불러오기", type="primary"):
             df = load_uploaded_excel(uploaded)
             synced = 0
+            zip_synced = 0
             if secret_text("GOOGLE_SERVICE_ACCOUNT_JSON_B64") or secret_value("GOOGLE_SERVICE_ACCOUNT_JSON", ""):
                 try:
                     df, synced = sync_status_from_google(df)
                 except Exception as exc:
                     st.warning(f"Google Sheet 기존 작업 기록을 불러오지 못했습니다: {exc}")
+                try:
+                    df, zip_synced = sync_status_from_drive_zips(df)
+                except Exception as exc:
+                    st.warning(f"Drive ZIP 기존 작업 기록을 불러오지 못했습니다: {exc}")
             set_df(df)
             st.session_state["current_page"] = first_incomplete_page(df)
             st.session_state["audios"] = {}
-            st.success(f"{uploaded.name}에서 {len(df):,}개 음원 행을 불러왔습니다. 기존 기록 {synced:,}개를 반영했습니다.")
+            st.success(f"{uploaded.name}에서 {len(df):,}개 음원 행을 불러왔습니다. Sheet 기록 {synced:,}개, Drive ZIP 기록 {zip_synced:,}개를 반영했습니다.")
             st.rerun()
-        st.caption("Gemini API Key는 Secrets에서 자동으로 읽습니다. 현재 페이지 단위로 발음 재사용 키 보정을 실행할 수 있습니다.")
+        st.caption("\uC791\uC5C5\uC790 \uAC80\uC218 \uBA54\uBAA8\uAC00 \uD3EC\uD568\uB41C \uC7AC\uCD94\uCD9C \uB9AC\uC2A4\uD2B8\uB97C \uC62C\uB9AC\uBA74 \uBC1C\uC74C \uAD00\uB828 \uCC38\uACE0\uC0AC\uD56D\uC744 \uC0DD\uC131 \uC2A4\uD06C\uB9BD\uD2B8\uC5D0 \uC790\uB3D9 \uBC18\uC601\uD569\uB2C8\uB2E4.")
 
     with st.expander("2. 성우 선택 / 미리듣기", expanded=current_voice_config() is None):
         render_voice_selector()
@@ -1228,24 +1442,24 @@ def main() -> None:
     c4.metric("저장완료", int((df["status"] == "저장완료").sum()))
 
     action_cols = st.columns([1.1, 1.2, 1.2, 1.1, 1.2, 2.0])
-    if action_cols[0].button("현재 페이지 생성", type="primary", use_container_width=True):
+    if action_cols[0].button("\uD604\uC7AC \uD398\uC774\uC9C0 \uC7AC\uCD94\uCD9C", type="primary", use_container_width=True):
         try:
             ok, failed = generate_page(page_df, force=False)
-            st.success(f"생성 완료: 성공 {ok}개 / 실패 {failed}개")
+            st.success(f"\uC7AC\uCD94\uCD9C \uC644\uB8CC: \uC131\uACF5 {ok}\uAC1C / \uC2E4\uD328 {failed}\uAC1C")
             st.rerun()
         except Exception as exc:
             st.error(str(exc))
-    if action_cols[1].button("현재 페이지 전체 재생성", use_container_width=True):
+    if action_cols[1].button("\uD604\uC7AC \uD398\uC774\uC9C0 \uAC15\uC81C \uC7AC\uCD94\uCD9C", use_container_width=True):
         try:
             ok, failed = generate_page(page_df, force=True)
-            st.success(f"재생성 완료: 성공 {ok}개 / 실패 {failed}개")
+            st.success(f"\uAC15\uC81C \uC7AC\uCD94\uCD9C \uC644\uB8CC: \uC131\uACF5 {ok}\uAC1C / \uC2E4\uD328 {failed}\uAC1C")
             st.rerun()
         except Exception as exc:
             st.error(str(exc))
-    if action_cols[2].button("Gemini 발음 재사용 분석", use_container_width=True):
+    if action_cols[2].button("Gemini \uC7AC\uC0AC\uC6A9 \uD0A4 \uBD84\uC11D", use_container_width=True):
         try:
             count = analyze_page_with_gemini(page_df)
-            st.success(f"발음 재사용 키 {count}개를 보정했습니다.")
+            st.success(f"\uBC1C\uC74C \uC7AC\uC0AC\uC6A9 \uD0A4 {count}\uAC1C\uB97C \uBCF4\uC815\uD588\uC2B5\uB2C8\uB2E4.")
             st.rerun()
         except Exception as exc:
             st.error(str(exc))
@@ -1253,7 +1467,7 @@ def main() -> None:
         zip_ready = savable_audio_count > 0 and ready_audio_count >= savable_audio_count
         if zip_ready:
             st.download_button(
-                "로컬 ZIP 저장",
+                "\uB85C\uCEEC ZIP \uC800\uC7A5",
                 build_page_zip(page_df),
                 file_name=page_zip_file_name(page_df, int(page)),
                 mime="application/zip",
@@ -1263,16 +1477,28 @@ def main() -> None:
             )
         else:
             st.button(
-                "로컬 ZIP 저장",
+                "\uB85C\uCEEC ZIP \uC800\uC7A5",
                 use_container_width=True,
                 disabled=True,
-                help=f"저장 가능 음원 {savable_audio_count}개 중 {ready_audio_count}개 생성됨",
+                help=f"\uC800\uC7A5 \uB300\uC0C1 {savable_audio_count}\uAC1C \uC911 {ready_audio_count}\uAC1C\uB9CC \uC0DD\uC131\uB428",
             )
     google_zip_ready = savable_audio_count > 0 and ready_audio_count >= savable_audio_count
-    if action_cols[4].button("Google ZIP 저장", use_container_width=True, disabled=not google_zip_ready):
+    if action_cols[4].button("Google ZIP \uC800\uC7A5", use_container_width=True, disabled=not google_zip_ready):
         try:
             saved, skipped, drive_url = submit_page_zip_to_drive(page_df, int(page))
-            st.session_state["google_zip_message"] = f"Google Drive ZIP 저장 완료: 저장완료 {saved}개 / 이상·미생성 {skipped}개"
+            st.session_state["google_zip_message"] = f"Google Drive ZIP \uC800\uC7A5 \uC644\uB8CC: \uC800\uC7A5\uC644\uB8CC {saved}\uAC1C / \uC81C\uC678 {skipped}\uAC1C"
+            st.session_state["google_zip_url"] = drive_url
+            st.session_state.pop("google_zip_error", None)
+            st.rerun()
+        except Exception as exc:
+            st.session_state["google_zip_error"] = str(exc)
+            st.session_state.pop("google_zip_message", None)
+            st.session_state.pop("google_zip_url", None)
+            st.rerun()
+    if action_cols[5].button("Drive ZIP \uAE30\uB85D \uBCF5\uAD6C", use_container_width=True, disabled=not google_enabled()):
+        try:
+            saved, skipped, drive_url = recover_page_status_from_drive_zip(page_df, int(page))
+            st.session_state["google_zip_message"] = f"Drive ZIP \uAE30\uB85D \uBCF5\uAD6C \uC644\uB8CC: \uC800\uC7A5\uC644\uB8CC {saved}\uAC1C / \uC81C\uC678 {skipped}\uAC1C"
             st.session_state["google_zip_url"] = drive_url
             st.session_state.pop("google_zip_error", None)
             st.rerun()
@@ -1282,7 +1508,28 @@ def main() -> None:
             st.session_state.pop("google_zip_url", None)
             st.rerun()
     if not google_zip_ready:
-        action_cols[5].caption(f"ZIP 저장 전 현재 페이지 생성 필요: {ready_audio_count}/{savable_audio_count}개 생성됨")
+        action_cols[5].caption(f"ZIP \uC800\uC7A5 \uC804 \uD604\uC7AC \uD398\uC774\uC9C0 \uC0DD\uC131 \uD544\uC694: {ready_audio_count}/{savable_audio_count}\uAC1C \uC0DD\uC131\uB428")
+    with st.expander("ZIP \uC800\uC7A5 \uAE30\uB85D \uBCF5\uAD6C", expanded=False):
+        recovery_zip = st.file_uploader(
+            "\uC774\uBBF8 \uC800\uC7A5\uD55C ZIP\uC744 \uC62C\uB9AC\uBA74 page_log.csv\uC640 MP3 \uAE30\uC900\uC73C\uB85C \uC2DC\uD2B8 \uC0C1\uD0DC\uB97C \uBCF5\uAD6C\uD569\uB2C8\uB2E4.",
+            type=["zip"],
+            key=f"recover_zip_{int(page)}",
+        )
+        if st.button("\uC5C5\uB85C\uB4DC\uD55C ZIP\uC73C\uB85C \uC2DC\uD2B8 \uC0C1\uD0DC \uBCF5\uAD6C", disabled=recovery_zip is None, use_container_width=True):
+            try:
+                saved, skipped = apply_page_zip_status(
+                    page_df,
+                    DRIVE_ZIP_RECOVERED_LABEL,
+                    zip_bytes=recovery_zip.getvalue(),
+                    require_session_audio=False,
+                )
+                st.session_state["google_zip_message"] = f"\uC5C5\uB85C\uB4DC ZIP \uC0C1\uD0DC \uBCF5\uAD6C \uC644\uB8CC: \uC800\uC7A5\uC644\uB8CC {saved}\uAC1C / \uC81C\uC678 {skipped}\uAC1C"
+                st.session_state.pop("google_zip_error", None)
+                st.rerun()
+            except Exception as exc:
+                st.session_state["google_zip_error"] = str(exc)
+                st.session_state.pop("google_zip_message", None)
+                st.rerun()
     if st.session_state.get("zip_submit_message"):
         st.success(st.session_state.pop("zip_submit_message"))
     if st.session_state.get("zip_submit_error"):
@@ -1290,20 +1537,20 @@ def main() -> None:
     if st.session_state.get("google_zip_message"):
         st.success(st.session_state.pop("google_zip_message"))
     if st.session_state.get("google_zip_url"):
-        st.link_button("저장된 ZIP 열기", st.session_state.pop("google_zip_url"))
+        st.link_button("\uC800\uC7A5\uB41C ZIP \uC5F4\uAE30", st.session_state.pop("google_zip_url"))
     if st.session_state.get("google_zip_error"):
         st.error(st.session_state.pop("google_zip_error"))
     with action_cols[5]:
         output = io.BytesIO()
         df.to_excel(output, index=False)
-        st.download_button("상태 반영 엑셀 다운로드", output.getvalue(), file_name="review_status.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        st.download_button("\uD604\uC7AC \uC0C1\uD0DC \uC5D1\uC140 \uB2E4\uC6B4\uB85C\uB4DC", output.getvalue(), file_name="reextract_status.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
     st.divider()
-    st.subheader("검수 목록")
-    st.caption("같은 발음으로 묶인 sense는 대표 행만 여기에서 검수합니다.")
+    st.subheader("\uC7AC\uCD94\uCD9C \uB300\uC0C1 \uBAA9\uB85D")
+    st.caption("\uAC01 \uD589\uC758 \uC791\uC5C5\uC790 \uBA54\uBAA8\uB97C \uD655\uC778\uD558\uACE0, \uC774\uC0C1\uC774 \uD574\uACB0\uB418\uC5C8\uB294\uC9C0 \uB4E4\uC5B4\uBCF8 \uB4A4 \uC800\uC7A5\uD558\uC138\uC694.")
     render_rows(main_page_df)
-    with st.expander(f"재사용 예정 파일 {len(reuse_page_df)}개", expanded=False):
-        st.caption("아래 행들은 위 대표 음원을 같은 발음으로 재사용하되, 저장 시 각 sense_code 파일명으로 따로 저장됩니다.")
+    with st.expander(f"\uAC19\uC740 \uBC1C\uC74C \uC7AC\uC0AC\uC6A9 \uB300\uC0C1 {len(reuse_page_df)}\uAC1C", expanded=False):
+        st.caption("\uAC19\uC740 pronunciation_key\uB97C \uC4F0\uB294 \uD589\uC785\uB2C8\uB2E4. \uB300\uD45C \uC74C\uC6D0\uC744 \uC0DD\uC131\uD558\uBA74 \uAC19\uC740 \uC74C\uC6D0\uC774 \uD30C\uC77C\uBA85\uBCC4\uB85C \uC800\uC7A5\uB429\uB2C8\uB2E4.")
         render_rows(reuse_page_df)
 
 
