@@ -91,6 +91,10 @@ def gemini_key() -> str:
     return secret_text("GEMINI_API_KEY") or secret_text("gemini_key")
 
 
+def google_drive_folder_id() -> str:
+    return secret_text("GOOGLE_DRIVE_FOLDER_ID", DEFAULT_GOOGLE_DRIVE_FOLDER_ID) or DEFAULT_GOOGLE_DRIVE_FOLDER_ID
+
+
 def clean_text(value) -> str:
     if value is None:
         return ""
@@ -455,7 +459,7 @@ def render_google_diagnostics() -> None:
                         fields="values",
                     ).execute(num_retries=0)
                     test_rows.append({"대상": label, "결과": "접근 가능", "시트ID": spreadsheet_id, "A1": values.get("values", [[""]])[0][0] if values.get("values") else ""})
-                folder_id = secret_text("GOOGLE_DRIVE_FOLDER_ID")
+                folder_id = google_drive_folder_id()
                 if folder_id:
                     folder = drive.files().get(fileId=folder_id, fields="id,name", supportsAllDrives=True).execute(num_retries=0)
                     test_rows.append({"대상": "Drive 폴더", "결과": "접근 가능", "시트ID": folder.get("id", ""), "A1": folder.get("name", "")})
@@ -681,7 +685,7 @@ def render_inline_play_button(audio_bytes: bytes, button_id: str) -> None:
 def google_enabled() -> bool:
     return bool(
         (secret_text("GOOGLE_SERVICE_ACCOUNT_JSON_B64") or secret_value("GOOGLE_SERVICE_ACCOUNT_JSON", ""))
-        and secret_text("GOOGLE_DRIVE_FOLDER_ID", "")
+        and google_drive_folder_id()
     )
 
 
@@ -784,7 +788,7 @@ def drive_zip_name_parts(file_name: str) -> tuple[str, int] | None:
 def list_drive_zip_files() -> dict[tuple[str, int], dict]:
     if not google_enabled():
         return {}
-    folder_id = secret_text("GOOGLE_DRIVE_FOLDER_ID")
+    folder_id = google_drive_folder_id()
     if not folder_id:
         return {}
     drive, _sheets = google_clients()
@@ -1170,6 +1174,7 @@ def upload_file_via_apps_script(file_name: str, file_bytes: bytes, mime_type: st
         "token": token,
         "file_name": file_name,
         "mime_type": mime_type,
+        "folder_id": google_drive_folder_id(),
         "content_b64": base64.b64encode(file_bytes).decode("ascii"),
     }
     request = urllib.request.Request(
@@ -1207,7 +1212,7 @@ def save_page_to_google(page_df: pd.DataFrame) -> tuple[int, int]:
     if not use_apps_script:
         from googleapiclient.http import MediaIoBaseUpload
         drive, _ = google_clients()
-    folder_id = secret_text("GOOGLE_DRIVE_FOLDER_ID")
+    folder_id = google_drive_folder_id()
     audios = get_audios()
     saved = 0
     skipped = 0
