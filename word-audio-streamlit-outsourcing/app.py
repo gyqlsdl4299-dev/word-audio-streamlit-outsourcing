@@ -333,8 +333,12 @@ def normalize_upload(df: pd.DataFrame) -> pd.DataFrame:
         df["worker_id"] = df["source_worker_id"]
     if "note" in df.columns and "issue_note" not in df.columns:
         df["issue_note"] = df["note"]
-    if "reextract_status" in df.columns and "status" not in df.columns:
-        df["status"] = df["reextract_status"]
+    if "reextract_status" in df.columns:
+        reextract_status = df["reextract_status"].map(clean_text)
+        if "status" not in df.columns:
+            df["status"] = reextract_status
+        else:
+            df["status"] = reextract_status.where(reextract_status != "", df["status"])
     if "reextract_file_name" in df.columns and "file_name" not in df.columns:
         df["file_name"] = df["reextract_file_name"]
     expected_columns = REQUIRED_COLUMNS + [column for column in REEXTRACT_OPTIONAL_COLUMNS if column not in REQUIRED_COLUMNS]
@@ -1701,5 +1705,6 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
 
 
