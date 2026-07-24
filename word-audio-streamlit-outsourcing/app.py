@@ -178,15 +178,21 @@ def dictionary_tts_text(word: str, pos: str = "", accent: str = "", issue_note: 
 
 
 def dictionary_voice_settings(variation: int = 0) -> dict:
-    # Keep isolated headwords flat and dictionary-like. Regeneration changes only
-    # the seed, not expressive style, so it does not drift into conversational intonation.
+    # Page generation stays very stable and flat. Regeneration lowers stability so
+    # ElevenLabs does not keep returning a near-identical take for the same word.
+    if variation:
+        profiles = [
+            {'stability': 0.56, 'similarity_boost': 0.62, 'style': 0.0, 'use_speaker_boost': False},
+            {'stability': 0.48, 'similarity_boost': 0.68, 'style': 0.0, 'use_speaker_boost': False},
+            {'stability': 0.64, 'similarity_boost': 0.58, 'style': 0.0, 'use_speaker_boost': False},
+        ]
+        return profiles[abs(int(variation)) % len(profiles)]
     return {
-        "stability": 1.0 if not variation else 0.92,
-        "similarity_boost": 0.55,
-        "style": 0.0,
-        "use_speaker_boost": False,
+        'stability': 1.0,
+        'similarity_boost': 0.55,
+        'style': 0.0,
+        'use_speaker_boost': False,
     }
-
 
 def voice_label(voice: dict) -> str:
     raw_gender = str(voice.get("gender") or "").lower()
@@ -681,6 +687,7 @@ def render_inline_play_button(audio_bytes: bytes, button_id: str) -> None:
         </script>
         """,
         height=42,
+        key=f"inline_audio_{safe_id}",
     )
 
 
@@ -1412,7 +1419,7 @@ def render_rows(page_df: pd.DataFrame) -> None:
 
             with cols[6]:
                 if key in audios:
-                    audio_hash = str(abs(hash(audios[key])))[-10:]
+                    audio_hash = hashlib.sha1(audios[key]).hexdigest()[:12]
                     render_inline_play_button(audios[key], f"play_{index}_{key}_{audio_hash}")
                 else:
                     st.caption("미생성")
