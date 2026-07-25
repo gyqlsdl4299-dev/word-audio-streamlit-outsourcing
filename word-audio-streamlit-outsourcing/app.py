@@ -1107,6 +1107,8 @@ def append_issue_sheet(row: pd.Series, note: str) -> None:
     if not spreadsheet_id:
         return
     _, sheets = google_clients()
+    issue_headers = ["submitted_at", "worker_label", "worker_page", "word", "sense_code", "accent", "file_name", "issue_note"]
+    ensure_sheet_exists(sheets, spreadsheet_id, issue_sheet, issue_headers)
     values = [[sheet_value(item) for item in [time.strftime("%Y-%m-%d %H:%M:%S"), row.get("worker_label", ""), row.get("worker_page", ""), row.get("word", ""), row.get("sense_code", ""), row.get("accent", ""), row.get("file_name", ""), note]]]
     sheets.spreadsheets().values().append(
         spreadsheetId=spreadsheet_id,
@@ -1188,6 +1190,8 @@ def append_issue_sheets(issue_rows: list[tuple[pd.Series, str]]) -> None:
     for spreadsheet_id, values in grouped.items():
         _, sheets = google_clients()
         issue_sheet = secret_text("GOOGLE_ISSUE_SHEET_NAME", "Issues")
+        issue_headers = ["submitted_at", "worker_label", "worker_page", "word", "sense_code", "accent", "file_name", "issue_note"]
+        ensure_sheet_exists(sheets, spreadsheet_id, issue_sheet, issue_headers)
         sheets.spreadsheets().values().append(
             spreadsheetId=spreadsheet_id,
             range=f"{issue_sheet}!A:H",
@@ -1705,6 +1709,7 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
 
 
 
