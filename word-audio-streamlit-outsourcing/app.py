@@ -1241,6 +1241,8 @@ def upload_file_via_apps_script(file_name: str, file_bytes: bytes, mime_type: st
         "file_name": file_name,
         "mime_type": mime_type,
         "folder_id": google_drive_folder_id(),
+        "folderId": google_drive_folder_id(),
+        "target_folder_id": google_drive_folder_id(),
         "content_b64": base64.b64encode(file_bytes).decode("ascii"),
     }
     request = urllib.request.Request(
@@ -1709,6 +1711,7 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
 
 
 
