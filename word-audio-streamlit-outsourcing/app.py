@@ -225,23 +225,39 @@ def preferred_voice_options(voices: list[dict], accent: str) -> dict[str, dict]:
             options[label] = voice
     return options
 
+def voice_text_blob(voice: dict) -> str:
+    labels = voice.get("labels") or {}
+    label_text = " ".join(clean_text(value) for value in labels.values())
+    return " ".join(
+        clean_text(value)
+        for value in [
+            voice.get("name"),
+            voice.get("accent"),
+            voice.get("gender"),
+            voice.get("age"),
+            voice.get("category"),
+            voice.get("description"),
+            label_text,
+        ]
+        if clean_text(value)
+    ).lower()
+
+
 def voice_gender_group(voice: dict) -> str:
-    raw_gender = clean_text(voice.get("gender")).lower()
-    if "female" in raw_gender or "woman" in raw_gender:
+    raw_gender = voice_text_blob({**voice, "accent": "", "age": "", "category": "", "description": ""})
+    if any(token in raw_gender for token in ["female", "woman", "women", "girl", "feminine"]):
         return "female"
-    if "male" in raw_gender or "man" in raw_gender:
+    if any(token in raw_gender for token in ["male", "man", "men", "boy", "masculine"]):
         return "male"
     return ""
 
 
 def voice_matches_accent(voice: dict, target_accent: str) -> bool:
-    accent_text = clean_text(voice.get("accent")).lower()
-    name_text = clean_text(voice.get("name")).lower()
-    haystack = f"{accent_text} {name_text}"
+    haystack = voice_text_blob(voice)
     if target_accent == "US":
-        return any(token in haystack for token in ["american", "united states", "usa", "us ", " u.s", " u.s."])
+        return any(token in haystack for token in ["american", "united states", "usa", " u.s", "u.s.", "us english"])
     if target_accent == "UK":
-        return any(token in haystack for token in ["british", "england", "english", "uk ", " u.k", " u.k."])
+        return any(token in haystack for token in ["british", "united kingdom", "uk english", "england", "english", " u.k", "u.k.", "rp", "received pronunciation", "london"])
     return True
 
 
@@ -295,9 +311,12 @@ def list_elevenlabs_voices(api_key: str) -> list[dict]:
             {
                 "voice_id": item.get("voice_id") or "",
                 "name": item.get("name") or "",
-                "accent": labels.get("accent") or labels.get("descriptive") or "",
-                "gender": labels.get("gender") or "",
+                "accent": labels.get("accent") or labels.get("descriptive") or labels.get("locale") or labels.get("language") or "",
+                "gender": labels.get("gender") or labels.get("voice_gender") or "",
                 "age": labels.get("age") or "",
+                "category": item.get("category") or "",
+                "description": item.get("description") or "",
+                "labels": labels,
             }
         )
     return sorted([v for v in voices if v["voice_id"]], key=lambda v: (v["accent"].lower(), v["gender"].lower(), v["name"].lower()))
@@ -427,6 +446,7 @@ def render_voice_selector() -> None:
         return
     if st.button("ElevenLabs 보이스 불러오기"):
         with st.spinner("보이스 목록을 불러오는 중입니다..."):
+            list_elevenlabs_voices.clear()
             st.session_state["voices"] = list_elevenlabs_voices(api_key)
     if "voices" not in st.session_state:
         st.session_state["voices"] = list_elevenlabs_voices(api_key)
@@ -571,7 +591,7 @@ def row_issue_reference(row: pd.Series) -> str:
 def generate_page(page_df: pd.DataFrame, force: bool = False) -> tuple[int, int]:
     config = current_voice_config()
     if not config:
-        raise RuntimeError("?? ??? ???? ??? ???.")
+        raise RuntimeError("먼저 성우를 선택하고 적용해 주세요.")
     audios = get_audios()
     page_cache: dict[tuple[str, str], bytes] = {}
     targets = page_df.index.tolist()
@@ -587,7 +607,7 @@ def generate_page(page_df: pd.DataFrame, force: bool = False) -> tuple[int, int]
         if not force and key in audios and clean_text(row["status"]) in {STATUS_REVIEWING, STATUS_DONE}:
             continue
         cache_key = (row["accent"], row["pronunciation_key"])
-        status_box.write(f"{offset}/{len(targets)} ?? ?: {row['word']} {row['accent']}")
+        status_box.write(f"{offset}/{len(targets)} 생성 중: {row['word']} {row['accent']}")
         try:
             if cache_key in page_cache:
                 audio = page_cache[cache_key]
@@ -1711,6 +1731,9 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+
+
 
 
 
